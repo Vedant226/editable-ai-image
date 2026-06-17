@@ -16,6 +16,9 @@ grounding_weights/
 # Generated demo output
 outputs/
 
+# Extraction pipeline intermediate/debug artifacts
+pipeline/_work/
+
 # OS / editor
 .DS_Store
 .vscode/
