@@ -3,36 +3,38 @@ import React, {
   useState,
   useRef,
   useMemo,
+  useReducer,
   useCallback,
 } from "react";
 
-import {
-  Stage,
-  Layer,
-  Image,
-  Transformer,
-  Text,
-} from "react-konva";
-
+import { Stage, Layer, Image, Transformer, Text } from "react-konva";
 import useImage from "use-image";
 
 import { createObjectManager } from "./objectManager";
 import { createVisualResolver } from "./visualResolver";
 import { useAlphaHitTester } from "./useAlphaHitTester";
+import { createEditingIllusionEngine } from "./editingIllusion";
+
+/* A Konva image bound to a (possibly dynamic) URL; renders nothing until loaded. */
+function KImage({ url, ...props }) {
+  const [img] = useImage(url);
+  if (!img) return null;
+  return <Image image={img} {...props} />;
+}
 
 /* ==========================
    EDITABLE LAYER
-   Renders one lifted Smart Object (image or text). Selection is driven by the
-   stage (Object Manager pickAt); this component handles drag, transform, and
-   requesting inline text editing (double-click on text).
+   One lifted Smart Object. Its pixels are the refined /lift CUTOUT once ready
+   (a drop-in for the old SAM PNG at the same footprint), else the SAM PNG as an
+   instant stand-in. A matte-hugging glow (Konva shadow over the alpha) marks
+   selection. Drag/transform model is unchanged from Phase 5.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTextEdit }) {
-  const [image] = useImage(`/layers/${encodeURIComponent(shapeProps.file || "")}`);
+function EditableLayer({ shapeProps, isSelected, isEditing, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
+  const [image] = useImage(cutoutUrl || `/layers/${encodeURIComponent(shapeProps.file || "")}`);
 
   const shapeRef = useRef(null);
   const trRef = useRef(null);
-
   const isText = shapeProps.type?.toLowerCase().includes("text");
 
   useEffect(() => {
@@ -42,18 +44,19 @@ function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTex
     }
   }, [isSelected, isEditing]);
 
-  const updatePosition = (e) => {
-    onChange({ ...shapeProps, x: e.target.x(), y: e.target.y() });
-  };
+  const glowProps =
+    glow > 0.01
+      ? { shadowColor: "#d8b36a", shadowBlur: 6 + glow * 16, shadowOpacity: glow, shadowForStrokeEnabled: false }
+      : {};
+
+  const updatePosition = (e) => onChange({ ...shapeProps, x: e.target.x(), y: e.target.y() });
 
   const handleTransform = () => {
     const node = shapeRef.current;
     const scaleX = node.scaleX();
     const scaleY = node.scaleY();
-
     node.scaleX(1);
     node.scaleY(1);
-
     onChange({
       ...shapeProps,
       x: node.x(),
@@ -75,9 +78,11 @@ function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTex
           width={shapeProps.width}
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
+          opacity={opacity ?? 1}
           draggable
           onDragEnd={updatePosition}
           onTransformEnd={handleTransform}
+          {...glowProps}
         />
       )}
 
@@ -91,6 +96,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTex
           width={shapeProps.width}
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
+          opacity={opacity ?? 1}
           fontFamily={shapeProps.fontFamily || "Cinzel"}
           fontStyle="bold"
           fontSize={Math.max(14, shapeProps.height * 0.55)}
@@ -103,6 +109,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTex
           onDblTap={() => onStartTextEdit?.(shapeProps.id)}
           onDragEnd={updatePosition}
           onTransformEnd={handleTransform}
+          {...glowProps}
         />
       )}
 
@@ -112,9 +119,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTex
 }
 
 /* ==========================
-   INLINE TEXT EDITOR
-   HTML textarea overlaid on the canvas at the text's on-screen position.
-   Commits on Enter or blur, cancels on Escape.
+   INLINE TEXT EDITOR (unchanged from Phase 4)
 ========================== */
 
 function InlineTextEditor({ rect, fontSize, fontFamily, color, initialValue, onCommit, onCancel }) {
@@ -179,26 +184,6 @@ function InlineTextEditor({ rect, fontSize, fontFamily, color, initialValue, onC
 }
 
 /* ==========================
-   REPAIR PATCH
-   Inpainted fill (from the backend) for a lifted/deleted object's footprint.
-========================== */
-
-function RepairPatch({ dataUrl, bbox }) {
-  const [img] = useImage(dataUrl);
-  if (!img || !bbox) return null;
-  return (
-    <Image
-      image={img}
-      x={bbox.x}
-      y={bbox.y}
-      width={bbox.w}
-      height={bbox.h}
-      listening={false}
-    />
-  );
-}
-
-/* ==========================
           APP
 ========================== */
 
@@ -211,7 +196,6 @@ const chip = {
   padding: "6px 10px",
   borderRadius: 6,
 };
-
 const btn = (enabled = true) => ({
   padding: "7px 12px",
   background: enabled ? "#d8b36a" : "#5a5039",
@@ -225,26 +209,84 @@ const btn = (enabled = true) => ({
 
 export default function App() {
   const [rawMetadata, setRawMetadata] = useState(null);
-  const [history, setHistory] = useState({
-    past: [],
-    present: { entries: {}, selectedId: null },
-    future: [],
-  });
+  const [history, setHistory] = useState({ past: [], present: { entries: {}, selectedId: null }, future: [] });
   const session = history.present;
 
-  const [viewport, setViewport] = useState({
-    w: window.innerWidth,
-    h: window.innerHeight,
-  });
-  const [inpaintEngine, setInpaintEngine] = useState(null);
+  const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
+  const [liftEngine, setLiftEngine] = useState(null);
   const [editingId, setEditingId] = useState(null);
+  const [, forceTick] = useReducer((c) => c + 1, 0);
 
   const [backgroundImage] = useImage("/layers/background.png");
   const stageRef = useRef(null);
-  const repairCacheRef = useRef(new Map());
   const backendReadyRef = useRef(false);
+  const liftAssetsRef = useRef(new Map()); // id -> { cutout:{url}, fill:{url,x,y,w,h}, shadow, readyAt } | {pending|failed}
+  const prevSelRef = useRef(null);
 
-  // ---- history: commit = undoable step, update = transient (selection/repair) ----
+  // Editing Illusion Engine (stateful; created once)
+  const eieRef = useRef(null);
+  if (!eieRef.current) eieRef.current = createEditingIllusionEngine();
+  const eie = eieRef.current;
+
+  const clockRef = useRef(performance.now());
+  const rafRunningRef = useRef(false);
+  const kick = useCallback(() => {
+    if (rafRunningRef.current) return;
+    rafRunningRef.current = true;
+    const step = () => {
+      const now = performance.now();
+      clockRef.current = now;
+      eie.tick(now);
+      forceTick();
+      if (eie.isAnimating(now)) requestAnimationFrame(step);
+      else rafRunningRef.current = false;
+    };
+    requestAnimationFrame(step);
+  }, [eie]);
+
+  // ---- Object Manager + Visual Resolver ----
+  const om = useMemo(() => (rawMetadata ? createObjectManager(rawMetadata) : null), [rawMetadata]);
+  const vr = useMemo(() => (om ? createVisualResolver(om) : null), [om]);
+  const isOpaqueAt = useAlphaHitTester(om);
+
+  useEffect(() => {
+    fetch("/layers/metadata.json")
+      .then((r) => r.json())
+      .then(setRawMetadata)
+      .catch((err) => {
+        console.error("Failed to load metadata.json", err);
+        setRawMetadata([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    const onResize = () => setViewport({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((h) => {
+        if (cancelled || !h) return;
+        backendReadyRef.current = true;
+        setLiftEngine(h.engine);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ---- single coordinate space ----
+  const imageSize = om ? om.getImageSize() : FALLBACK_IMAGE_SIZE;
+  const scale = Math.min(viewport.w / imageSize.width, viewport.h / imageSize.height);
+  const stageWidth = imageSize.width * scale;
+  const stageHeight = imageSize.height * scale;
+
+  // ---- history helpers ----
   const commit = useCallback((updater) => {
     setHistory((h) => {
       const next = updater(h.present);
@@ -263,143 +305,78 @@ export default function App() {
     setEditingId(null);
     setHistory((h) =>
       h.past.length
-        ? {
-            past: h.past.slice(0, -1),
-            present: h.past[h.past.length - 1],
-            future: [h.present, ...h.future],
-          }
+        ? { past: h.past.slice(0, -1), present: h.past[h.past.length - 1], future: [h.present, ...h.future] }
         : h
     );
   }, []);
   const redo = useCallback(() => {
     setEditingId(null);
     setHistory((h) =>
-      h.future.length
-        ? { past: [...h.past, h.present], present: h.future[0], future: h.future.slice(1) }
-        : h
+      h.future.length ? { past: [...h.past, h.present], present: h.future[0], future: h.future.slice(1) } : h
     );
   }, []);
 
-  // ---- Object Manager + Visual Resolver (derived once from raw metadata) ----
-  const om = useMemo(
-    () => (rawMetadata ? createObjectManager(rawMetadata) : null),
-    [rawMetadata]
-  );
-  const vr = useMemo(() => (om ? createVisualResolver(om) : null), [om]);
-  const isOpaqueAt = useAlphaHitTester(om);
-
-  useEffect(() => {
-    fetch("/layers/metadata.json")
-      .then((r) => r.json())
-      .then(setRawMetadata)
-      .catch((err) => {
-        console.error("Failed to load metadata.json", err);
-        setRawMetadata([]);
-      });
-  }, []);
-
-  useEffect(() => {
-    const onResize = () =>
-      setViewport({ w: window.innerWidth, h: window.innerHeight });
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/health")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((h) => {
-        if (cancelled || !h) return;
-        backendReadyRef.current = true;
-        setInpaintEngine(h.engine);
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // ---- single coordinate space: native image px, uniformly fit to viewport ----
-  const imageSize = om ? om.getImageSize() : FALLBACK_IMAGE_SIZE;
-  const scale = Math.min(
-    viewport.w / imageSize.width,
-    viewport.h / imageSize.height
-  );
-  const stageWidth = imageSize.width * scale;
-  const stageHeight = imageSize.height * scale;
-
-  // ---- on-demand inpaint: fill the hole behind a lifted/deleted object ----
-  const requestRepair = useCallback(
+  // ---- prefetch the Lift Package (cutout + fill + shadow) for an object ----
+  const prefetchLift = useCallback(
     async (id) => {
-      if (!om || !backendReadyRef.current) return;
-
-      const cached = repairCacheRef.current.get(id);
-      if (cached) {
-        update((s) => om.attachRepair(s, id, cached));
+      if (!backendReadyRef.current) return;
+      const cached = liftAssetsRef.current.get(id);
+      if (cached && cached.cutout) {
+        eie.setAssets(id, "ready", performance.now());
         return;
       }
-
-      repairCacheRef.current.set(id, { status: "pending" });
-      update((s) => om.attachRepair(s, id, { status: "pending" }));
-
+      if (cached && cached.pending) return;
+      liftAssetsRef.current.set(id, { pending: true });
       try {
-        const res = await fetch("/api/inpaint", {
+        const res = await fetch("/api/lift", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ objectId: id }),
         });
-        if (!res.ok) throw new Error(`inpaint ${res.status}`);
+        if (!res.ok) throw new Error(`lift ${res.status}`);
         const p = await res.json();
-        const repair = {
-          status: "ready",
-          dataUrl: p.png,
-          bbox: { x: p.x, y: p.y, w: p.w, h: p.h },
-        };
-        repairCacheRef.current.set(id, repair);
-        update((s) => om.attachRepair(s, id, repair));
+        liftAssetsRef.current.set(id, {
+          cutout: { url: p.cutout.png },
+          fill: { url: p.fill.png, x: p.fill.x, y: p.fill.y, w: p.fill.w, h: p.fill.h },
+          shadow: p.shadow,
+          readyAt: performance.now(),
+        });
+        eie.setAssets(id, "ready", performance.now());
+        kick();
       } catch (err) {
-        console.warn("repair failed", err);
-        const repair = { status: "failed" };
-        repairCacheRef.current.set(id, repair);
-        update((s) => om.attachRepair(s, id, repair));
+        console.warn("lift failed", err);
+        liftAssetsRef.current.set(id, { failed: true });
+        eie.setAssets(id, "failed", performance.now());
       }
     },
-    [om, update]
+    [eie, kick]
   );
 
-  // ---- selection: a click resolves to the best object via the OM ----
+  // ---- selection ----
   const handleStageClick = useCallback(
     (e) => {
       if (!om) return;
       const stage = e.target.getStage();
       if (!stage) return;
-
       const parent = e.target.getParent && e.target.getParent();
       if (parent && parent.className === "Transformer") return;
-
       const point = stage.getRelativePointerPosition();
       if (!point) return;
 
-      const picked = om.pickAt(point, {
-        currentSelectionId: session.selectedId,
-        isOpaqueAt,
-      });
-
+      const picked = om.pickAt(point, { currentSelectionId: session.selectedId, isOpaqueAt });
       if (!picked) {
-        update((s) => om.select(s, null)); // empty click → deselect (not undoable)
+        update((s) => om.select(s, null));
         return;
       }
-
       const existing = session.entries[picked.id];
       if (existing && existing.state === "active") {
-        update((s) => om.select(s, picked.id)); // already lifted → reselect only
+        update((s) => om.select(s, picked.id));
       } else {
-        commit((s) => om.activate(s, picked.id).session); // new lift → undoable
-        requestRepair(picked.id);
+        commit((s) => om.activate(s, picked.id).session);
+        prefetchLift(picked.id);
       }
     },
-    [om, isOpaqueAt, session.selectedId, session.entries, requestRepair, commit, update]
+    [om, isOpaqueAt, session.selectedId, session.entries, commit, update, prefetchLift]
   );
 
   const handleObjectChange = useCallback(
@@ -412,9 +389,7 @@ export default function App() {
           height: attrs.height,
           rotation: attrs.rotation,
         });
-        if (typeof attrs.text === "string" && attrs.text !== prevText) {
-          next = om.setText(next, id, attrs.text);
-        }
+        if (typeof attrs.text === "string" && attrs.text !== prevText) next = om.setText(next, id, attrs.text);
         return next;
       }),
     [om, commit]
@@ -439,27 +414,27 @@ export default function App() {
   const deleteSelected = useCallback(() => {
     const id = session.selectedId;
     if (id == null || !om) return;
-    requestRepair(id); // ensure the footprint is inpainted so it reads as removed
-    commit((s) => om.select(om.softDelete(s, id), null));
-  }, [session.selectedId, om, requestRepair, commit]);
+    eie.delete(id, performance.now());
+    kick();
+    const ms = eie.config.deleteMs + 40;
+    setTimeout(() => commit((s) => om.select(om.softDelete(s, id), null)), ms);
+  }, [session.selectedId, om, eie, kick, commit]);
 
   const bringToFront = useCallback(() => {
     const id = session.selectedId;
     if (id != null && om) commit((s) => om.bringToFront(s, id));
   }, [session.selectedId, om, commit]);
-
   const sendToBack = useCallback(() => {
     const id = session.selectedId;
     if (id != null && om) commit((s) => om.sendToBack(s, id));
   }, [session.selectedId, om, commit]);
 
-  // ---- keyboard: undo/redo, delete, deselect ----
+  // ---- keyboard ----
   useEffect(() => {
     const onKey = (e) => {
-      if (editingId != null) return; // text editor owns keys
+      if (editingId != null) return;
       const tag = (e.target && e.target.tagName) || "";
       if (tag === "INPUT" || tag === "TEXTAREA") return;
-
       const meta = e.metaKey || e.ctrlKey;
       if (meta && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -481,7 +456,28 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [editingId, session.selectedId, undo, redo, deleteSelected, update, om]);
 
-  // ---- export at native resolution, regardless of on-screen fit-scale ----
+  // ---- reconcile the illusion engine with the session (selection + lifts) ----
+  useEffect(() => {
+    if (!om) return;
+    const now = performance.now();
+    const active = new Set(
+      Object.values(session.entries)
+        .filter((e) => e.state === "active" && !e.deleted)
+        .map((e) => e.objectId)
+    );
+    for (const id of active) if (!eie.has(id)) eie.ensurePlaced(id, now);
+    for (const id of eie.ids()) {
+      if (!active.has(id) && !session.entries[id]?.deleted) eie.remove(id);
+    }
+    if (prevSelRef.current !== session.selectedId) {
+      if (session.selectedId != null) eie.select(session.selectedId, now);
+      else eie.deselect(now);
+      prevSelRef.current = session.selectedId;
+    }
+    kick();
+  }, [session, om, eie, kick]);
+
+  // ---- export at native resolution ----
   const handleExport = useCallback(() => {
     const stage = stageRef.current;
     if (!stage) return;
@@ -495,27 +491,31 @@ export default function App() {
     });
   }, [scale, om, update]);
 
-  const scene = vr ? vr.resolveScene(session) : { activeVisuals: [], repairs: [] };
-
-  const selected =
-    session.selectedId != null && om ? om.getObject(session.selectedId) : null;
+  const scene = vr ? vr.resolveScene(session) : { activeVisuals: [] };
+  const now = clockRef.current;
+  const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
   const selectedVisual = selected && vr ? vr.resolve(selected.id, session) : null;
-  const selectedRepair = selected ? session.entries[selected.id]?.repair?.status : null;
 
-  // screen-space rect for the inline text editor overlay
+  // fills: cover lifted footprints (active) and erased footprints (deleted)
+  const fills = [];
+  for (const v of scene.activeVisuals) {
+    const a = liftAssetsRef.current.get(v.objectId);
+    if (a && a.fill) fills.push({ id: v.objectId, ...a.fill });
+  }
+  for (const entry of Object.values(session.entries)) {
+    if (entry.deleted) {
+      const a = liftAssetsRef.current.get(entry.objectId);
+      if (a && a.fill) fills.push({ id: entry.objectId, ...a.fill });
+    }
+  }
+
+  // inline editor screen rect
   let editor = null;
   if (editingId != null && om && stageRef.current) {
     const o = om.getObject(editingId);
     if (o) {
       const entry = session.entries[editingId];
-      const t =
-        entry?.transform || {
-          x: o.bbox.x,
-          y: o.bbox.y,
-          width: o.bbox.w,
-          height: o.bbox.h,
-          rotation: o.rotation,
-        };
+      const t = entry?.transform || { x: o.bbox.x, y: o.bbox.y, width: o.bbox.w, height: o.bbox.h, rotation: o.rotation };
       const cont = stageRef.current.container().getBoundingClientRect();
       editor = {
         rect: {
@@ -533,15 +533,6 @@ export default function App() {
     }
   }
 
-  const repairLabel =
-    selectedRepair === "pending"
-      ? "filling…"
-      : selectedRepair === "ready"
-      ? "filled"
-      : selectedRepair === "failed"
-      ? "fill failed"
-      : null;
-
   return (
     <div
       style={{
@@ -554,14 +545,12 @@ export default function App() {
         justifyContent: "center",
       }}
     >
-      {/* status HUD */}
       <div style={{ ...chip, position: "absolute", top: 12, left: 12, zIndex: 10, pointerEvents: "none" }}>
         {selected ? `selected: ${selected.category}#${selected.id}` : "click an object to lift it"}
         {selected?.role === "text" ? "  ·  double-click to edit" : ""}
-        {`  ·  inpaint: ${inpaintEngine || "offline"}`}
+        {`  ·  lift: ${liftEngine || "offline"}`}
       </div>
 
-      {/* top-right controls */}
       <div style={{ position: "absolute", top: 12, right: 12, zIndex: 10, display: "flex", gap: 8 }}>
         <button onClick={undo} disabled={!history.past.length} style={btn(history.past.length > 0)}>
           ↶ Undo
@@ -574,7 +563,6 @@ export default function App() {
         </button>
       </div>
 
-      {/* selection toolbar (gated by VisualObject caps) */}
       {selected && !editingId && (
         <div
           style={{
@@ -584,7 +572,6 @@ export default function App() {
             transform: "translateX(-50%)",
             zIndex: 10,
             display: "flex",
-            alignItems: "center",
             gap: 8,
             padding: 8,
             background: "rgba(0,0,0,0.55)",
@@ -603,14 +590,10 @@ export default function App() {
             Send to back
           </button>
           {selectedVisual?.caps?.deletable && (
-            <button
-              onClick={deleteSelected}
-              style={{ ...btn(true), background: "#c0563f", color: "#fff" }}
-            >
+            <button onClick={deleteSelected} style={{ ...btn(true), background: "#c0563f", color: "#fff" }}>
               Delete
             </button>
           )}
-          {repairLabel && <span style={{ ...chip, padding: "6px 8px" }}>{repairLabel}</span>}
         </div>
       )}
 
@@ -625,23 +608,18 @@ export default function App() {
       >
         <Layer>
           {/* BASE — the original image, the only visual source of truth */}
-          <Image
-            image={backgroundImage}
-            x={0}
-            y={0}
-            width={imageSize.width}
-            height={imageSize.height}
-            listening={false}
-          />
+          <Image image={backgroundImage} x={0} y={0} width={imageSize.width} height={imageSize.height} listening={false} />
 
-          {/* REPAIRS — inpainted patches covering lifted/deleted footprints */}
-          {scene.repairs.map((r) => (
-            <RepairPatch key={`repair-${r.objectId}`} dataUrl={r.dataUrl} bbox={r.bbox} />
+          {/* REPAIR FILLS — inpainted patches covering lifted/erased footprints */}
+          {fills.map((f) => (
+            <KImage key={`fill-${f.id}`} url={f.url} x={f.x} y={f.y} width={f.w} height={f.h} listening={false} />
           ))}
 
-          {/* LIFTED SMART OBJECTS (resolved by the Visual Object Resolver) */}
+          {/* LIFTED SMART OBJECTS */}
           {scene.activeVisuals.map((v) => {
             const t = v.transform;
+            const fr = eie.frame(v.objectId, now);
+            const a = liftAssetsRef.current.get(v.objectId);
             const shapeProps = {
               id: v.objectId,
               file: v.file,
@@ -663,6 +641,9 @@ export default function App() {
                 shapeProps={shapeProps}
                 isSelected={session.selectedId === v.objectId}
                 isEditing={editingId === v.objectId}
+                glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
+                opacity={fr ? fr.cutout.opacity : 1}
+                cutoutUrl={!v.isText && a && a.cutout ? a.cutout.url : null}
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
                 onStartTextEdit={startTextEdit}
               />

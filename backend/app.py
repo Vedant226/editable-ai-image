@@ -217,14 +217,18 @@ def lift(req: LiftRequest):
     mx1, my1 = min(W, ox1 + pad), min(H, oy1 + pad)
     crop_rgb = bg[my0:my1, mx0:mx1]
     alpha = refine_matte(crop_rgb, obj_mask[my0:my1, mx0:mx1], radius=max(4, round(min(w, h) * 0.04)))
-    cutout_rgba = decontaminate(crop_rgb, alpha, filled[my0:my1, mx0:mx1])
+    cutout_pad = decontaminate(crop_rgb, alpha, filled[my0:my1, mx0:mx1])
+    # crop the cutout to the exact footprint so the frontend can drop it in at
+    # the object's transform (same bbox the old SAM PNG used)
+    fyo, fxo = oy0 - my0, ox0 - mx0
+    cutout_rgba = cutout_pad[fyo : fyo + h, fxo : fxo + w]
 
     resp = {
         "objectId": req.objectId,
         "engine": engine.engine,
         "footprint": {"x": ox0, "y": oy0, "w": w, "h": h},
         "cutout": {
-            "x": mx0, "y": my0, "w": mx1 - mx0, "h": my1 - my0,
+            "x": ox0, "y": oy0, "w": w, "h": h,
             "png": _data_url(cutout_rgba),
         },
         "fill": {

@@ -242,6 +242,39 @@ export function createEditingIllusionEngine(config = {}) {
       }
     },
 
+    ids: () => [...lifts.keys()],
+
+    /** Create a lift already in PLACED (used to reconcile objects that appear
+     *  active without a fresh lift, e.g. after undo/redo). No animation. */
+    ensurePlaced(id, now) {
+      let l = lifts.get(id);
+      if (!l) {
+        l = {
+          phase: PHASE.PLACED,
+          since: now,
+          selected: false,
+          selectedSince: now - C.glowMs,
+          deselectedSince: now - C.glowMs,
+          assets: "ready",
+          fill: "lama",
+          fillSwapSince: null,
+        };
+        lifts.set(id, l);
+      }
+      return l;
+    },
+
+    /** True while any transition or glow/cross-fade is mid-flight (drives RAF). */
+    isAnimating(now) {
+      for (const l of lifts.values()) {
+        if (l.phase === PHASE.LIFTING || l.phase === PHASE.SETTLING || l.phase === PHASE.DELETING) return true;
+        if (l.selected && now - l.selectedSince < C.glowMs) return true;
+        if (!l.selected && now - l.deselectedSince < C.glowMs) return true;
+        if (l.fillSwapSince != null && now - l.fillSwapSince < C.fillFadeMs) return true;
+      }
+      return false;
+    },
+
     frame: computeFrame,
     frames(now) {
       const out = [];
