@@ -23,11 +23,11 @@ import { useAlphaHitTester } from "./useAlphaHitTester";
 /* ==========================
    EDITABLE LAYER
    Renders one lifted Smart Object (image or text). Selection is driven by the
-   stage (Object Manager pickAt), so this component only handles drag, transform
-   and (text) double-click editing.
+   stage (Object Manager pickAt); this component handles drag, transform, and
+   requesting inline text editing (double-click on text).
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, onChange }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTextEdit }) {
   const [image] = useImage(`/layers/${encodeURIComponent(shapeProps.file || "")}`);
 
   const shapeRef = useRef(null);
@@ -36,11 +36,11 @@ function EditableLayer({ shapeProps, isSelected, onChange }) {
   const isText = shapeProps.type?.toLowerCase().includes("text");
 
   useEffect(() => {
-    if (isSelected && trRef.current && shapeRef.current) {
+    if (isSelected && !isEditing && trRef.current && shapeRef.current) {
       trRef.current.nodes([shapeRef.current]);
       trRef.current.getLayer()?.batchDraw();
     }
-  }, [isSelected]);
+  }, [isSelected, isEditing]);
 
   const updatePosition = (e) => {
     onChange({ ...shapeProps, x: e.target.x(), y: e.target.y() });
@@ -64,13 +64,6 @@ function EditableLayer({ shapeProps, isSelected, onChange }) {
     });
   };
 
-  const editText = () => {
-    if (!isText) return;
-    const newText = window.prompt("Edit text:", shapeProps.text || "");
-    if (newText === null || !newText.trim()) return;
-    onChange({ ...shapeProps, text: newText });
-  };
-
   return (
     <>
       {!isText && image && (
@@ -91,6 +84,7 @@ function EditableLayer({ shapeProps, isSelected, onChange }) {
       {isText && (
         <Text
           ref={shapeRef}
+          visible={!isEditing}
           text={shapeProps.text || "Edit me"}
           x={shapeProps.x}
           y={shapeProps.y}
@@ -103,23 +97,91 @@ function EditableLayer({ shapeProps, isSelected, onChange }) {
           fill={shapeProps.fontColor || "#d8b36a"}
           stroke={shapeProps.strokeColor || "#5a2e12"}
           strokeWidth={shapeProps.strokeWidth || 1}
+          align="center"
           draggable
-          onDblClick={editText}
+          onDblClick={() => onStartTextEdit?.(shapeProps.id)}
+          onDblTap={() => onStartTextEdit?.(shapeProps.id)}
           onDragEnd={updatePosition}
           onTransformEnd={handleTransform}
         />
       )}
 
-      {isSelected && <Transformer ref={trRef} rotateEnabled />}
+      {isSelected && !isEditing && <Transformer ref={trRef} rotateEnabled />}
     </>
   );
 }
 
 /* ==========================
+   INLINE TEXT EDITOR
+   An HTML textarea overlaid on the canvas at the text's on-screen position,
+   matching font/scale. Commits on Enter or blur, cancels on Escape. Replaces
+   the old window.prompt.
+========================== */
+
+function InlineTextEditor({ rect, fontSize, fontFamily, color, initialValue, onCommit, onCancel }) {
+  const ref = useRef(null);
+  const doneRef = useRef(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (el) {
+      el.focus();
+      el.select();
+    }
+  }, []);
+
+  const finish = (commit) => {
+    if (doneRef.current) return;
+    doneRef.current = true;
+    if (commit) onCommit(ref.current?.value ?? initialValue);
+    else onCancel();
+  };
+
+  return (
+    <textarea
+      ref={ref}
+      defaultValue={initialValue}
+      spellCheck={false}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          finish(true);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          finish(false);
+        }
+      }}
+      onBlur={() => finish(true)}
+      style={{
+        position: "fixed",
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        width: `${Math.max(40, rect.width)}px`,
+        height: `${Math.max(rect.height, fontSize * 1.3)}px`,
+        fontSize: `${fontSize}px`,
+        fontFamily,
+        fontWeight: "bold",
+        color,
+        textAlign: "center",
+        lineHeight: 1.05,
+        background: "rgba(10,10,10,0.82)",
+        border: "1px solid #d8b36a",
+        outline: "none",
+        margin: 0,
+        padding: 0,
+        resize: "none",
+        overflow: "hidden",
+        transformOrigin: "top left",
+        transform: rect.rotation ? `rotate(${rect.rotation}deg)` : "none",
+        zIndex: 20,
+      }}
+    />
+  );
+}
+
+/* ==========================
    REPAIR PATCH
-   The inpainted fill (from the backend) for a lifted object's original
-   footprint. Sits between the base image and the lifted object, so moving the
-   object reveals clean background instead of the original.
+   Inpainted fill (from the backend) for a lifted object's original footprint.
 ========================== */
 
 function RepairPatch({ dataUrl, bbox }) {
@@ -151,6 +213,7 @@ export default function App() {
     h: window.innerHeight,
   });
   const [inpaintEngine, setInpaintEngine] = useState(null);
+  const [editingId, setEditingId] = useState(null);
 
   const [backgroundImage] = useImage("/layers/background.png");
   const stageRef = useRef(null);
@@ -294,6 +357,21 @@ export default function App() {
     [om]
   );
 
+  // ---- inline text editing ----
+  const startTextEdit = useCallback((id) => setEditingId(id), []);
+  const cancelText = useCallback(() => setEditingId(null), []);
+  const commitText = useCallback(
+    (value) => {
+      const id = editingId;
+      setEditingId(null);
+      if (id == null || !om) return;
+      const v = (value ?? "").trim();
+      if (!v) return; // empty → keep previous text
+      setSession((s) => om.setText(s, id, v));
+    },
+    [editingId, om]
+  );
+
   // ---- export at native resolution, regardless of on-screen fit-scale ----
   const handleExport = useCallback(() => {
     const stage = stageRef.current;
@@ -312,6 +390,37 @@ export default function App() {
 
   const selected =
     session.selectedId != null && om ? om.getObject(session.selectedId) : null;
+
+  // screen-space rect for the inline text editor overlay
+  let editor = null;
+  if (editingId != null && om && stageRef.current) {
+    const o = om.getObject(editingId);
+    if (o) {
+      const entry = session.entries[editingId];
+      const t =
+        entry?.transform || {
+          x: o.bbox.x,
+          y: o.bbox.y,
+          width: o.bbox.w,
+          height: o.bbox.h,
+          rotation: o.rotation,
+        };
+      const cont = stageRef.current.container().getBoundingClientRect();
+      editor = {
+        rect: {
+          left: cont.left + t.x * scale,
+          top: cont.top + t.y * scale,
+          width: t.width * scale,
+          height: t.height * scale,
+          rotation: t.rotation || 0,
+        },
+        fontSize: Math.max(14, t.height * 0.55) * scale,
+        fontFamily: o.style?.fontFamily || "Cinzel",
+        color: o.style?.fontColor || "#d8b36a",
+        initialValue: entry?.text ?? o.text,
+      };
+    }
+  }
 
   return (
     <div
@@ -342,6 +451,7 @@ export default function App() {
         {selected
           ? `selected: ${selected.category}#${selected.id}`
           : "click an object to lift it"}
+        {selected?.role === "text" ? "  ·  double-click to edit" : ""}
         {`  ·  inpaint: ${inpaintEngine || "offline"}`}
       </div>
 
@@ -412,12 +522,26 @@ export default function App() {
                 key={v.objectId}
                 shapeProps={shapeProps}
                 isSelected={session.selectedId === v.objectId}
+                isEditing={editingId === v.objectId}
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
+                onStartTextEdit={startTextEdit}
               />
             );
           })}
         </Layer>
       </Stage>
+
+      {editor && (
+        <InlineTextEditor
+          rect={editor.rect}
+          fontSize={editor.fontSize}
+          fontFamily={editor.fontFamily}
+          color={editor.color}
+          initialValue={editor.initialValue}
+          onCommit={commitText}
+          onCancel={cancelText}
+        />
+      )}
     </div>
   );
 }
