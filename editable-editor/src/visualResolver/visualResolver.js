@@ -57,13 +57,23 @@ export function createVisualResolver(om) {
   /** Resolve the whole scene: base + repair patches + active VisualObjects. */
   const resolveScene = (session) => {
     const activeVisuals = [];
+    const repairs = [];
     for (const entry of Object.values(session.entries)) {
       if (entry.deleted || entry.state !== "active") continue;
       const v = resolve(entry.objectId, session);
       if (v) activeVisuals.push(v);
+      // A ready repair patch covers the object's original footprint, so moving
+      // the lifted object no longer reveals the original beneath it.
+      if (entry.repair?.status === "ready" && entry.repair.dataUrl) {
+        repairs.push({
+          objectId: entry.objectId,
+          dataUrl: entry.repair.dataUrl,
+          bbox: entry.repair.bbox,
+        });
+      }
     }
     const { base } = om.getRenderModel(session);
-    return { base, repairs: [], activeVisuals };
+    return { base, repairs, activeVisuals };
   };
 
   return { resolve, resolveScene };

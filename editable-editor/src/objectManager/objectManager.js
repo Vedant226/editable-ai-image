@@ -145,6 +145,16 @@ export function createObjectManager(rawMetadata, options = {}) {
       };
     },
 
+    // Attach (or update) the inpaint repair patch for a lifted object.
+    attachRepair: (session, id, repair) => {
+      const entry = session.entries[id];
+      if (!entry) return session;
+      return {
+        ...session,
+        entries: { ...session.entries, [id]: { ...entry, repair } },
+      };
+    },
+
     // ---------- render model (logical; VOR resolves visuals in Phase 2) ----------
     getRenderModel: (session) => {
       const base = { file: backgroundFile, bbox: { x: 0, y: 0, w: imageSize.width, h: imageSize.height } };

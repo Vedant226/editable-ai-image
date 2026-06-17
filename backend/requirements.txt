@@ -1,0 +1,8 @@
+# Already satisfied by the project venv; listed for reproducibility.
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2
+pillow>=10
+numpy>=1.26
+opencv-python-headless>=4.9
+torch>=2.2          # used to load big-lama.pt (TorchScript); CPU is fine

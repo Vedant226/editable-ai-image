@@ -23,8 +23,8 @@ import { useAlphaHitTester } from "./useAlphaHitTester";
 /* ==========================
    EDITABLE LAYER
    Renders one lifted Smart Object (image or text). Selection is driven by the
-   stage (Object Manager pickAt), so this component no longer handles clicks —
-   it only handles drag, transform and (text) double-click editing.
+   stage (Object Manager pickAt), so this component only handles drag, transform
+   and (text) double-click editing.
 ========================== */
 
 function EditableLayer({ shapeProps, isSelected, onChange }) {
@@ -116,6 +116,28 @@ function EditableLayer({ shapeProps, isSelected, onChange }) {
 }
 
 /* ==========================
+   REPAIR PATCH
+   The inpainted fill (from the backend) for a lifted object's original
+   footprint. Sits between the base image and the lifted object, so moving the
+   object reveals clean background instead of the original.
+========================== */
+
+function RepairPatch({ dataUrl, bbox }) {
+  const [img] = useImage(dataUrl);
+  if (!img || !bbox) return null;
+  return (
+    <Image
+      image={img}
+      x={bbox.x}
+      y={bbox.y}
+      width={bbox.w}
+      height={bbox.h}
+      listening={false}
+    />
+  );
+}
+
+/* ==========================
           APP
 ========================== */
 
@@ -128,9 +150,12 @@ export default function App() {
     w: window.innerWidth,
     h: window.innerHeight,
   });
+  const [inpaintEngine, setInpaintEngine] = useState(null);
 
   const [backgroundImage] = useImage("/layers/background.png");
   const stageRef = useRef(null);
+  const repairCacheRef = useRef(new Map()); // objectId -> repair (cache across activations)
+  const backendReadyRef = useRef(false);
 
   // ---- Object Manager + Visual Resolver (derived once from raw metadata) ----
   const om = useMemo(
@@ -157,6 +182,22 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // probe the inpaint backend once; repairs are only requested if it's up
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((h) => {
+        if (cancelled || !h) return;
+        backendReadyRef.current = true;
+        setInpaintEngine(h.engine);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // ---- single coordinate space: native image px, uniformly fit to viewport ----
   const imageSize = om ? om.getImageSize() : FALLBACK_IMAGE_SIZE;
   const scale = Math.min(
@@ -165,6 +206,45 @@ export default function App() {
   );
   const stageWidth = imageSize.width * scale;
   const stageHeight = imageSize.height * scale;
+
+  // ---- on-demand inpaint: fill the hole behind a lifted object (cached) ----
+  const requestRepair = useCallback(
+    async (id) => {
+      if (!om || !backendReadyRef.current) return;
+
+      const cached = repairCacheRef.current.get(id);
+      if (cached) {
+        setSession((s) => om.attachRepair(s, id, cached));
+        return;
+      }
+
+      repairCacheRef.current.set(id, { status: "pending" });
+      setSession((s) => om.attachRepair(s, id, { status: "pending" }));
+
+      try {
+        const res = await fetch("/api/inpaint", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objectId: id }),
+        });
+        if (!res.ok) throw new Error(`inpaint ${res.status}`);
+        const p = await res.json();
+        const repair = {
+          status: "ready",
+          dataUrl: p.png,
+          bbox: { x: p.x, y: p.y, w: p.w, h: p.h },
+        };
+        repairCacheRef.current.set(id, repair);
+        setSession((s) => om.attachRepair(s, id, repair));
+      } catch (err) {
+        console.warn("repair failed", err);
+        const repair = { status: "failed" };
+        repairCacheRef.current.set(id, repair);
+        setSession((s) => om.attachRepair(s, id, repair));
+      }
+    },
+    [om]
+  );
 
   // ---- selection: a click resolves to the best object via the OM ----
   const handleStageClick = useCallback(
@@ -180,16 +260,20 @@ export default function App() {
       const point = stage.getRelativePointerPosition();
       if (!point) return;
 
-      setSession((s) => {
-        const picked = om.pickAt(point, {
-          currentSelectionId: s.selectedId,
-          isOpaqueAt,
-        });
-        if (!picked) return om.select(s, null); // empty click → deselect
-        return om.activate(s, picked.id).session; // lift + select
+      const picked = om.pickAt(point, {
+        currentSelectionId: session.selectedId,
+        isOpaqueAt,
       });
+
+      if (!picked) {
+        setSession((s) => om.select(s, null)); // empty click → deselect
+        return;
+      }
+
+      setSession((s) => om.activate(s, picked.id).session); // lift + select
+      requestRepair(picked.id);
     },
-    [om, isOpaqueAt]
+    [om, isOpaqueAt, session.selectedId, requestRepair]
   );
 
   const handleObjectChange = useCallback(
@@ -224,11 +308,10 @@ export default function App() {
     });
   }, [scale, om]);
 
-  const scene = vr
-    ? vr.resolveScene(session)
-    : { activeVisuals: [] };
+  const scene = vr ? vr.resolveScene(session) : { activeVisuals: [], repairs: [] };
 
-  const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
+  const selected =
+    session.selectedId != null && om ? om.getObject(session.selectedId) : null;
 
   return (
     <div
@@ -259,6 +342,7 @@ export default function App() {
         {selected
           ? `selected: ${selected.category}#${selected.id}`
           : "click an object to lift it"}
+        {`  ·  inpaint: ${inpaintEngine || "offline"}`}
       </div>
 
       <button
@@ -299,6 +383,11 @@ export default function App() {
             height={imageSize.height}
             listening={false}
           />
+
+          {/* REPAIRS — inpainted patches covering lifted objects' footprints */}
+          {scene.repairs.map((r) => (
+            <RepairPatch key={`repair-${r.objectId}`} dataUrl={r.dataUrl} bbox={r.bbox} />
+          ))}
 
           {/* LIFTED SMART OBJECTS (resolved by the Visual Object Resolver) */}
           {scene.activeVisuals.map((v) => {
