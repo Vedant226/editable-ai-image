@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "om:report": "node scripts/report.js",
-    "om:test": "node scripts/selftest.js"
+    "om:test": "node scripts/selftest.js",
+    "eie:test": "node scripts/eie-test.js"
   },
   "dependencies": {
     "konva": "^9.3.22",
