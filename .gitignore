@@ -1,0 +1,22 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+editable-editor/dist/
+
+# Model weights (large binaries — keep out of git)
+*.pth
+models/
+grounding_weights/
+
+# Generated demo output
+outputs/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
