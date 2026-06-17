@@ -107,8 +107,9 @@ export function createObjectManager(rawMetadata, options = {}) {
         if (!other || other.id === obj.id) continue;
         if (other.parentId === obj.id || obj.parentId === other.id) delete entries[key];
       }
+      const maxZ = Object.values(entries).reduce((m, e) => Math.max(m, e.z || 0), 0);
       const entry = entries[obj.id] || { objectId: obj.id, transform: IDENTITY(obj) };
-      entries[obj.id] = { ...entry, state: "active", deleted: false };
+      entries[obj.id] = { ...entry, state: "active", deleted: false, z: entry.z ?? maxZ + 1 };
       const next = { ...session, selectedId: obj.id, entries };
       // mask geometry is the Visual Object Resolver's job (Phase 3); bbox-level for now.
       const repairRequest = { objectId: obj.id, bbox: { ...obj.bbox }, reason: "activate-lift" };
@@ -153,6 +154,20 @@ export function createObjectManager(rawMetadata, options = {}) {
         ...session,
         entries: { ...session.entries, [id]: { ...entry, repair } },
       };
+    },
+
+    bringToFront: (session, id) => {
+      const entry = session.entries[id];
+      if (!entry) return session;
+      const maxZ = Object.values(session.entries).reduce((m, e) => Math.max(m, e.z || 0), 0);
+      return { ...session, entries: { ...session.entries, [id]: { ...entry, z: maxZ + 1 } } };
+    },
+
+    sendToBack: (session, id) => {
+      const entry = session.entries[id];
+      if (!entry) return session;
+      const minZ = Object.values(session.entries).reduce((m, e) => Math.min(m, e.z || 0), 0);
+      return { ...session, entries: { ...session.entries, [id]: { ...entry, z: minZ - 1 } } };
     },
 
     // ---------- render model (logical; VOR resolves visuals in Phase 2) ----------

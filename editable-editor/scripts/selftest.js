@@ -81,5 +81,27 @@ const tv = vr.resolve(textObj.id, s3);
 check("text object resolves as text", tv.isText === true);
 check("setText is reflected in the visual", tv.text === "HELLO");
 
+console.log("\nDELETE + Z-ORDER");
+let sd = om.activate(om.createSession(), leaf.id).session;
+sd = om.attachRepair(sd, leaf.id, {
+  status: "ready",
+  dataUrl: "data:image/png;base64,AA",
+  bbox: { x: leaf.bbox.x, y: leaf.bbox.y, w: leaf.bbox.w, h: leaf.bbox.h },
+});
+sd = om.softDelete(sd, leaf.id);
+const sceneD = vr.resolveScene(sd);
+check("deleted object renders no active visual", !sceneD.activeVisuals.some((v) => v.objectId === leaf.id));
+check("deleted object still shows its repair patch (erased)", sceneD.repairs.some((r) => r.objectId === leaf.id));
+
+const flower = om.getEditableObjects().find((o) => o.category === "flower");
+let sz = om.activate(om.activate(om.createSession(), flower.id).session, leaf.id).session;
+const orderA = vr.resolveScene(sz).activeVisuals.map((v) => v.objectId);
+check("newest activation renders on top", orderA[orderA.length - 1] === leaf.id);
+sz = om.sendToBack(sz, leaf.id);
+check("sendToBack moves object to the back", vr.resolveScene(sz).activeVisuals[0].objectId === leaf.id);
+sz = om.bringToFront(sz, leaf.id);
+const orderC = vr.resolveScene(sz).activeVisuals.map((v) => v.objectId);
+check("bringToFront moves object to the front", orderC[orderC.length - 1] === leaf.id);
+
 console.log(`\n${fail === 0 ? "ALL PASS" : "FAILURES"} — ${pass} passed, ${fail} failed\n`);
 process.exit(fail === 0 ? 0 : 1);

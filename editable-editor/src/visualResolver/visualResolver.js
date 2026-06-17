@@ -59,19 +59,30 @@ export function createVisualResolver(om) {
     const activeVisuals = [];
     const repairs = [];
     for (const entry of Object.values(session.entries)) {
-      if (entry.deleted || entry.state !== "active") continue;
-      const v = resolve(entry.objectId, session);
-      if (v) activeVisuals.push(v);
-      // A ready repair patch covers the object's original footprint, so moving
-      // the lifted object no longer reveals the original beneath it.
-      if (entry.repair?.status === "ready" && entry.repair.dataUrl) {
-        repairs.push({
-          objectId: entry.objectId,
-          dataUrl: entry.repair.dataUrl,
-          bbox: entry.repair.bbox,
-        });
+      const repairReady = entry.repair?.status === "ready" && entry.repair.dataUrl;
+      const repairPatch = repairReady
+        ? { objectId: entry.objectId, dataUrl: entry.repair.dataUrl, bbox: entry.repair.bbox }
+        : null;
+
+      // A deleted object renders ONLY its repair patch: the footprint stays
+      // filled with clean background, so the object reads as removed.
+      if (entry.deleted) {
+        if (repairPatch) repairs.push(repairPatch);
+        continue;
       }
+      if (entry.state !== "active") continue;
+
+      const v = resolve(entry.objectId, session);
+      if (v) {
+        v.z = entry.z || 0;
+        activeVisuals.push(v);
+      }
+      // The patch covers the object's original footprint, so moving the lifted
+      // object no longer reveals the original beneath it.
+      if (repairPatch) repairs.push(repairPatch);
     }
+
+    activeVisuals.sort((a, b) => (a.z || 0) - (b.z || 0)); // low z = back
     const { base } = om.getRenderModel(session);
     return { base, repairs, activeVisuals };
   };

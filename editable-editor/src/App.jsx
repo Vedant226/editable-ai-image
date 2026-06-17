@@ -113,9 +113,8 @@ function EditableLayer({ shapeProps, isSelected, isEditing, onChange, onStartTex
 
 /* ==========================
    INLINE TEXT EDITOR
-   An HTML textarea overlaid on the canvas at the text's on-screen position,
-   matching font/scale. Commits on Enter or blur, cancels on Escape. Replaces
-   the old window.prompt.
+   HTML textarea overlaid on the canvas at the text's on-screen position.
+   Commits on Enter or blur, cancels on Escape.
 ========================== */
 
 function InlineTextEditor({ rect, fontSize, fontFamily, color, initialValue, onCommit, onCancel }) {
@@ -181,7 +180,7 @@ function InlineTextEditor({ rect, fontSize, fontFamily, color, initialValue, onC
 
 /* ==========================
    REPAIR PATCH
-   Inpainted fill (from the backend) for a lifted object's original footprint.
+   Inpainted fill (from the backend) for a lifted/deleted object's footprint.
 ========================== */
 
 function RepairPatch({ dataUrl, bbox }) {
@@ -205,9 +204,34 @@ function RepairPatch({ dataUrl, bbox }) {
 
 const FALLBACK_IMAGE_SIZE = { width: 1408, height: 768 };
 
+const chip = {
+  background: "rgba(0,0,0,0.45)",
+  color: "#d8b36a",
+  font: "13px/1.4 monospace",
+  padding: "6px 10px",
+  borderRadius: 6,
+};
+
+const btn = (enabled = true) => ({
+  padding: "7px 12px",
+  background: enabled ? "#d8b36a" : "#5a5039",
+  color: "#1a1a1a",
+  border: "none",
+  borderRadius: 6,
+  fontWeight: 600,
+  cursor: enabled ? "pointer" : "default",
+  opacity: enabled ? 1 : 0.6,
+});
+
 export default function App() {
   const [rawMetadata, setRawMetadata] = useState(null);
-  const [session, setSession] = useState({ entries: {}, selectedId: null });
+  const [history, setHistory] = useState({
+    past: [],
+    present: { entries: {}, selectedId: null },
+    future: [],
+  });
+  const session = history.present;
+
   const [viewport, setViewport] = useState({
     w: window.innerWidth,
     h: window.innerHeight,
@@ -217,8 +241,44 @@ export default function App() {
 
   const [backgroundImage] = useImage("/layers/background.png");
   const stageRef = useRef(null);
-  const repairCacheRef = useRef(new Map()); // objectId -> repair (cache across activations)
+  const repairCacheRef = useRef(new Map());
   const backendReadyRef = useRef(false);
+
+  // ---- history: commit = undoable step, update = transient (selection/repair) ----
+  const commit = useCallback((updater) => {
+    setHistory((h) => {
+      const next = updater(h.present);
+      if (next === h.present) return h;
+      return { past: [...h.past, h.present], present: next, future: [] };
+    });
+  }, []);
+  const update = useCallback((updater) => {
+    setHistory((h) => {
+      const next = updater(h.present);
+      if (next === h.present) return h;
+      return { ...h, present: next };
+    });
+  }, []);
+  const undo = useCallback(() => {
+    setEditingId(null);
+    setHistory((h) =>
+      h.past.length
+        ? {
+            past: h.past.slice(0, -1),
+            present: h.past[h.past.length - 1],
+            future: [h.present, ...h.future],
+          }
+        : h
+    );
+  }, []);
+  const redo = useCallback(() => {
+    setEditingId(null);
+    setHistory((h) =>
+      h.future.length
+        ? { past: [...h.past, h.present], present: h.future[0], future: h.future.slice(1) }
+        : h
+    );
+  }, []);
 
   // ---- Object Manager + Visual Resolver (derived once from raw metadata) ----
   const om = useMemo(
@@ -245,7 +305,6 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  // probe the inpaint backend once; repairs are only requested if it's up
   useEffect(() => {
     let cancelled = false;
     fetch("/api/health")
@@ -270,19 +329,19 @@ export default function App() {
   const stageWidth = imageSize.width * scale;
   const stageHeight = imageSize.height * scale;
 
-  // ---- on-demand inpaint: fill the hole behind a lifted object (cached) ----
+  // ---- on-demand inpaint: fill the hole behind a lifted/deleted object ----
   const requestRepair = useCallback(
     async (id) => {
       if (!om || !backendReadyRef.current) return;
 
       const cached = repairCacheRef.current.get(id);
       if (cached) {
-        setSession((s) => om.attachRepair(s, id, cached));
+        update((s) => om.attachRepair(s, id, cached));
         return;
       }
 
       repairCacheRef.current.set(id, { status: "pending" });
-      setSession((s) => om.attachRepair(s, id, { status: "pending" }));
+      update((s) => om.attachRepair(s, id, { status: "pending" }));
 
       try {
         const res = await fetch("/api/inpaint", {
@@ -298,15 +357,15 @@ export default function App() {
           bbox: { x: p.x, y: p.y, w: p.w, h: p.h },
         };
         repairCacheRef.current.set(id, repair);
-        setSession((s) => om.attachRepair(s, id, repair));
+        update((s) => om.attachRepair(s, id, repair));
       } catch (err) {
         console.warn("repair failed", err);
         const repair = { status: "failed" };
         repairCacheRef.current.set(id, repair);
-        setSession((s) => om.attachRepair(s, id, repair));
+        update((s) => om.attachRepair(s, id, repair));
       }
     },
-    [om]
+    [om, update]
   );
 
   // ---- selection: a click resolves to the best object via the OM ----
@@ -316,7 +375,6 @@ export default function App() {
       const stage = e.target.getStage();
       if (!stage) return;
 
-      // ignore clicks on transformer handles (resize/rotate anchors)
       const parent = e.target.getParent && e.target.getParent();
       if (parent && parent.className === "Transformer") return;
 
@@ -329,19 +387,24 @@ export default function App() {
       });
 
       if (!picked) {
-        setSession((s) => om.select(s, null)); // empty click → deselect
+        update((s) => om.select(s, null)); // empty click → deselect (not undoable)
         return;
       }
 
-      setSession((s) => om.activate(s, picked.id).session); // lift + select
-      requestRepair(picked.id);
+      const existing = session.entries[picked.id];
+      if (existing && existing.state === "active") {
+        update((s) => om.select(s, picked.id)); // already lifted → reselect only
+      } else {
+        commit((s) => om.activate(s, picked.id).session); // new lift → undoable
+        requestRepair(picked.id);
+      }
     },
-    [om, isOpaqueAt, session.selectedId, requestRepair]
+    [om, isOpaqueAt, session.selectedId, session.entries, requestRepair, commit, update]
   );
 
   const handleObjectChange = useCallback(
     (id, attrs, prevText) =>
-      setSession((s) => {
+      commit((s) => {
         let next = om.applyTransform(s, id, {
           x: attrs.x,
           y: attrs.y,
@@ -354,7 +417,7 @@ export default function App() {
         }
         return next;
       }),
-    [om]
+    [om, commit]
   );
 
   // ---- inline text editing ----
@@ -366,17 +429,63 @@ export default function App() {
       setEditingId(null);
       if (id == null || !om) return;
       const v = (value ?? "").trim();
-      if (!v) return; // empty → keep previous text
-      setSession((s) => om.setText(s, id, v));
+      if (!v) return;
+      commit((s) => om.setText(s, id, v));
     },
-    [editingId, om]
+    [editingId, om, commit]
   );
+
+  // ---- toolbar actions ----
+  const deleteSelected = useCallback(() => {
+    const id = session.selectedId;
+    if (id == null || !om) return;
+    requestRepair(id); // ensure the footprint is inpainted so it reads as removed
+    commit((s) => om.select(om.softDelete(s, id), null));
+  }, [session.selectedId, om, requestRepair, commit]);
+
+  const bringToFront = useCallback(() => {
+    const id = session.selectedId;
+    if (id != null && om) commit((s) => om.bringToFront(s, id));
+  }, [session.selectedId, om, commit]);
+
+  const sendToBack = useCallback(() => {
+    const id = session.selectedId;
+    if (id != null && om) commit((s) => om.sendToBack(s, id));
+  }, [session.selectedId, om, commit]);
+
+  // ---- keyboard: undo/redo, delete, deselect ----
+  useEffect(() => {
+    const onKey = (e) => {
+      if (editingId != null) return; // text editor owns keys
+      const tag = (e.target && e.target.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redo();
+        else undo();
+      } else if (meta && e.key.toLowerCase() === "y") {
+        e.preventDefault();
+        redo();
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        if (session.selectedId != null) {
+          e.preventDefault();
+          deleteSelected();
+        }
+      } else if (e.key === "Escape") {
+        update((s) => (om ? om.select(s, null) : s));
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editingId, session.selectedId, undo, redo, deleteSelected, update, om]);
 
   // ---- export at native resolution, regardless of on-screen fit-scale ----
   const handleExport = useCallback(() => {
     const stage = stageRef.current;
     if (!stage) return;
-    setSession((s) => (om ? om.select(s, null) : s)); // hide transformer
+    update((s) => (om ? om.select(s, null) : s));
     requestAnimationFrame(() => {
       const uri = stage.toDataURL({ pixelRatio: 1 / scale });
       const link = document.createElement("a");
@@ -384,12 +493,14 @@ export default function App() {
       link.href = uri;
       link.click();
     });
-  }, [scale, om]);
+  }, [scale, om, update]);
 
   const scene = vr ? vr.resolveScene(session) : { activeVisuals: [], repairs: [] };
 
   const selected =
     session.selectedId != null && om ? om.getObject(session.selectedId) : null;
+  const selectedVisual = selected && vr ? vr.resolve(selected.id, session) : null;
+  const selectedRepair = selected ? session.entries[selected.id]?.repair?.status : null;
 
   // screen-space rect for the inline text editor overlay
   let editor = null;
@@ -422,6 +533,15 @@ export default function App() {
     }
   }
 
+  const repairLabel =
+    selectedRepair === "pending"
+      ? "filling…"
+      : selectedRepair === "ready"
+      ? "filled"
+      : selectedRepair === "failed"
+      ? "fill failed"
+      : null;
+
   return (
     <div
       style={{
@@ -434,45 +554,65 @@ export default function App() {
         justifyContent: "center",
       }}
     >
-      <div
-        style={{
-          position: "absolute",
-          top: 12,
-          left: 12,
-          zIndex: 10,
-          color: "#d8b36a",
-          font: "13px/1.4 monospace",
-          background: "rgba(0,0,0,0.45)",
-          padding: "6px 10px",
-          borderRadius: 6,
-          pointerEvents: "none",
-        }}
-      >
-        {selected
-          ? `selected: ${selected.category}#${selected.id}`
-          : "click an object to lift it"}
+      {/* status HUD */}
+      <div style={{ ...chip, position: "absolute", top: 12, left: 12, zIndex: 10, pointerEvents: "none" }}>
+        {selected ? `selected: ${selected.category}#${selected.id}` : "click an object to lift it"}
         {selected?.role === "text" ? "  ·  double-click to edit" : ""}
         {`  ·  inpaint: ${inpaintEngine || "offline"}`}
       </div>
 
-      <button
-        onClick={handleExport}
-        style={{
-          position: "absolute",
-          top: 12,
-          right: 12,
-          zIndex: 10,
-          padding: "8px 14px",
-          background: "#d8b36a",
-          color: "#1a1a1a",
-          border: "none",
-          borderRadius: 6,
-          fontWeight: 600,
-          cursor: "pointer",
-        }}
-      >
-        Export PNG
-      </button>
+      {/* top-right controls */}
+      <div style={{ position: "absolute", top: 12, right: 12, zIndex: 10, display: "flex", gap: 8 }}>
+        <button onClick={undo} disabled={!history.past.length} style={btn(history.past.length > 0)}>
+          ↶ Undo
+        </button>
+        <button onClick={redo} disabled={!history.future.length} style={btn(history.future.length > 0)}>
+          ↷ Redo
+        </button>
+        <button onClick={handleExport} style={btn(true)}>
+          Export PNG
+        </button>
+      </div>
+
+      {/* selection toolbar (gated by VisualObject caps) */}
+      {selected && !editingId && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 16,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 10,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: 8,
+            background: "rgba(0,0,0,0.55)",
+            borderRadius: 10,
+          }}
+        >
+          {selectedVisual?.caps?.textEditable && (
+            <button onClick={() => startTextEdit(selected.id)} style={btn(true)}>
+              Edit text
+            </button>
+          )}
+          <button onClick={bringToFront} style={btn(true)}>
+            Bring to front
+          </button>
+          <button onClick={sendToBack} style={btn(true)}>
+            Send to back
+          </button>
+          {selectedVisual?.caps?.deletable && (
+            <button
+              onClick={deleteSelected}
+              style={{ ...btn(true), background: "#c0563f", color: "#fff" }}
+            >
+              Delete
+            </button>
+          )}
+          {repairLabel && <span style={{ ...chip, padding: "6px 8px" }}>{repairLabel}</span>}
+        </div>
+      )}
 
       <Stage
         ref={stageRef}
@@ -494,7 +634,7 @@ export default function App() {
             listening={false}
           />
 
-          {/* REPAIRS — inpainted patches covering lifted objects' footprints */}
+          {/* REPAIRS — inpainted patches covering lifted/deleted footprints */}
           {scene.repairs.map((r) => (
             <RepairPatch key={`repair-${r.objectId}`} dataUrl={r.dataUrl} bbox={r.bbox} />
           ))}
