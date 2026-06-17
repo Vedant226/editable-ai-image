@@ -44,6 +44,21 @@ export function deriveModel(rawObjects, options = {}) {
       rawType: raw.type,
       text: hasString ? String(raw.text) : "",
       isOcrText,
+      // typography passthrough for text objects (so an activated text node
+      // renders with its original styling); null for non-text.
+      style:
+        c.role === ROLE.TEXT
+          ? {
+              fontFamily: raw.fontFamily,
+              fontWeight: raw.fontWeight,
+              fontColor: raw.fontColor,
+              strokeColor: raw.strokeColor,
+              strokeWidth: raw.strokeWidth,
+              textAlign: raw.textAlign,
+              letterSpacing: raw.letterSpacing,
+              shadowBlur: raw.shadowBlur,
+            }
+          : null,
       bbox,
       area: area(bbox),
       areaFraction: 0, // filled once image size known

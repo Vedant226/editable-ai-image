@@ -2,6 +2,7 @@ import React, {
   useEffect,
   useState,
   useRef,
+  useMemo,
   useCallback,
 } from "react";
 
@@ -11,19 +12,22 @@ import {
   Image,
   Transformer,
   Text,
-  Rect,
 } from "react-konva";
 
 import useImage from "use-image";
 
-import { getLayerData } from "./layerData";
+import { createObjectManager } from "./objectManager";
+import { createVisualResolver } from "./visualResolver";
+import { useAlphaHitTester } from "./useAlphaHitTester";
 
 /* ==========================
    EDITABLE LAYER
-   (behavior unchanged — Phase 2 will route this through the Object Manager)
+   Renders one lifted Smart Object (image or text). Selection is driven by the
+   stage (Object Manager pickAt), so this component no longer handles clicks —
+   it only handles drag, transform and (text) double-click editing.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, onSelect, onChange }) {
+function EditableLayer({ shapeProps, isSelected, onChange }) {
   const [image] = useImage(`/layers/${encodeURIComponent(shapeProps.file || "")}`);
 
   const shapeRef = useRef(null);
@@ -62,17 +66,13 @@ function EditableLayer({ shapeProps, isSelected, onSelect, onChange }) {
 
   const editText = () => {
     if (!isText) return;
-
     const newText = window.prompt("Edit text:", shapeProps.text || "");
-
     if (newText === null || !newText.trim()) return;
-
     onChange({ ...shapeProps, text: newText });
   };
 
   return (
     <>
-      {/* IMAGE */}
       {!isText && image && (
         <Image
           ref={shapeRef}
@@ -83,14 +83,11 @@ function EditableLayer({ shapeProps, isSelected, onSelect, onChange }) {
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
           draggable
-          onClick={onSelect}
-          onTap={onSelect}
           onDragEnd={updatePosition}
           onTransformEnd={handleTransform}
         />
       )}
 
-      {/* TEXT */}
       {isText && (
         <Text
           ref={shapeRef}
@@ -107,15 +104,12 @@ function EditableLayer({ shapeProps, isSelected, onSelect, onChange }) {
           stroke={shapeProps.strokeColor || "#5a2e12"}
           strokeWidth={shapeProps.strokeWidth || 1}
           draggable
-          onClick={onSelect}
-          onTap={onSelect}
           onDblClick={editText}
           onDragEnd={updatePosition}
           onTransformEnd={handleTransform}
         />
       )}
 
-      {/* TRANSFORMER */}
       {isSelected && <Transformer ref={trRef} rotateEnabled />}
     </>
   );
@@ -125,104 +119,102 @@ function EditableLayer({ shapeProps, isSelected, onSelect, onChange }) {
           APP
 ========================== */
 
-// Used only until the real background.png reports its natural size.
 const FALLBACK_IMAGE_SIZE = { width: 1408, height: 768 };
 
 export default function App() {
-  const [layers, setLayers] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
-
-  const [backgroundImage] = useImage("/layers/background.png");
-
-  // Viewport size drives the fit-scale; we recompute on resize.
+  const [rawMetadata, setRawMetadata] = useState(null);
+  const [session, setSession] = useState({ entries: {}, selectedId: null });
   const [viewport, setViewport] = useState({
     w: window.innerWidth,
     h: window.innerHeight,
   });
 
+  const [backgroundImage] = useImage("/layers/background.png");
   const stageRef = useRef(null);
 
-  /* ----------------------------------------------------------
-     SINGLE COORDINATE SPACE
-     The canvas works entirely in NATIVE image pixels. The whole
-     stage is then uniformly scaled to fit the viewport, so the
-     background, click zones, editable objects and export all
-     share one coordinate system (fixes click misalignment and
-     lets us export at full resolution).
-  ---------------------------------------------------------- */
-  const imageSize =
-    backgroundImage && backgroundImage.naturalWidth
-      ? {
-          width: backgroundImage.naturalWidth,
-          height: backgroundImage.naturalHeight,
-        }
-      : FALLBACK_IMAGE_SIZE;
-
-  const scale = Math.min(
-    viewport.w / imageSize.width,
-    viewport.h / imageSize.height
+  // ---- Object Manager + Visual Resolver (derived once from raw metadata) ----
+  const om = useMemo(
+    () => (rawMetadata ? createObjectManager(rawMetadata) : null),
+    [rawMetadata]
   );
+  const vr = useMemo(() => (om ? createVisualResolver(om) : null), [om]);
+  const isOpaqueAt = useAlphaHitTester(om);
 
-  const stageWidth = imageSize.width * scale;
-  const stageHeight = imageSize.height * scale;
+  useEffect(() => {
+    fetch("/layers/metadata.json")
+      .then((r) => r.json())
+      .then(setRawMetadata)
+      .catch((err) => {
+        console.error("Failed to load metadata.json", err);
+        setRawMetadata([]);
+      });
+  }, []);
 
   useEffect(() => {
     const onResize = () =>
       setViewport({ w: window.innerWidth, h: window.innerHeight });
-
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  useEffect(() => {
-    async function load() {
-      const data = await getLayerData();
+  // ---- single coordinate space: native image px, uniformly fit to viewport ----
+  const imageSize = om ? om.getImageSize() : FALLBACK_IMAGE_SIZE;
+  const scale = Math.min(
+    viewport.w / imageSize.width,
+    viewport.h / imageSize.height
+  );
+  const stageWidth = imageSize.width * scale;
+  const stageHeight = imageSize.height * scale;
 
-      // NOTE: temporary heuristic filter — Phase 2 replaces this with the
-      // Object Manager. Kept verbatim so Phase 1 only changes coordinates.
-      const filtered = data.filter((layer) => {
-        const type = layer.type?.toLowerCase() || "";
-        const area = layer.width * layer.height;
-        const isText = type.includes("text");
+  // ---- selection: a click resolves to the best object via the OM ----
+  const handleStageClick = useCallback(
+    (e) => {
+      if (!om) return;
+      const stage = e.target.getStage();
+      if (!stage) return;
 
-        if (isText) return true;
+      // ignore clicks on transformer handles (resize/rotate anchors)
+      const parent = e.target.getParent && e.target.getParent();
+      if (parent && parent.className === "Transformer") return;
 
-        const badKeywords = [
-          "historical_portrait",
-          "portrait_frame",
-          "royal_portrait",
-          "background",
-          "decorative_border",
-        ];
+      const point = stage.getRelativePointerPosition();
+      if (!point) return;
 
-        const isBad = badKeywords.some((keyword) => type.includes(keyword));
-
-        if (isBad) return false;
-        if (area > 35000) return false;
-        if (layer.width > 220 || layer.height > 220) return false;
-
-        return true;
+      setSession((s) => {
+        const picked = om.pickAt(point, {
+          currentSelectionId: s.selectedId,
+          isOpaqueAt,
+        });
+        if (!picked) return om.select(s, null); // empty click → deselect
+        return om.activate(s, picked.id).session; // lift + select
       });
+    },
+    [om, isOpaqueAt]
+  );
 
-      filtered.sort((a, b) => a.zIndex - b.zIndex);
+  const handleObjectChange = useCallback(
+    (id, attrs, prevText) =>
+      setSession((s) => {
+        let next = om.applyTransform(s, id, {
+          x: attrs.x,
+          y: attrs.y,
+          width: attrs.width,
+          height: attrs.height,
+          rotation: attrs.rotation,
+        });
+        if (typeof attrs.text === "string" && attrs.text !== prevText) {
+          next = om.setText(next, id, attrs.text);
+        }
+        return next;
+      }),
+    [om]
+  );
 
-      setLayers(filtered);
-    }
-
-    load();
-  }, []);
-
-  /* ----------------------------------------------------------
-     EXPORT at native resolution, independent of the on-screen
-     fit-scale. The stage is drawn at `scale`, so pixelRatio
-     1/scale renders it back out at full image resolution.
-  ---------------------------------------------------------- */
+  // ---- export at native resolution, regardless of on-screen fit-scale ----
   const handleExport = useCallback(() => {
     const stage = stageRef.current;
     if (!stage) return;
-
-    setSelectedId(null); // keep the transformer handles out of the export
-
+    setSession((s) => (om ? om.select(s, null) : s)); // hide transformer
     requestAnimationFrame(() => {
       const uri = stage.toDataURL({ pixelRatio: 1 / scale });
       const link = document.createElement("a");
@@ -230,7 +222,13 @@ export default function App() {
       link.href = uri;
       link.click();
     });
-  }, [scale]);
+  }, [scale, om]);
+
+  const scene = vr
+    ? vr.resolveScene(session)
+    : { activeVisuals: [] };
+
+  const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
 
   return (
     <div
@@ -244,6 +242,25 @@ export default function App() {
         justifyContent: "center",
       }}
     >
+      <div
+        style={{
+          position: "absolute",
+          top: 12,
+          left: 12,
+          zIndex: 10,
+          color: "#d8b36a",
+          font: "13px/1.4 monospace",
+          background: "rgba(0,0,0,0.45)",
+          padding: "6px 10px",
+          borderRadius: 6,
+          pointerEvents: "none",
+        }}
+      >
+        {selected
+          ? `selected: ${selected.category}#${selected.id}`
+          : "click an object to lift it"}
+      </div>
+
       <button
         onClick={handleExport}
         style={{
@@ -269,13 +286,11 @@ export default function App() {
         height={stageHeight}
         scaleX={scale}
         scaleY={scale}
-        onMouseDown={(e) => {
-          const clickedOnEmpty = e.target === e.target.getStage();
-          if (clickedOnEmpty) setSelectedId(null);
-        }}
+        onClick={handleStageClick}
+        onTap={handleStageClick}
       >
         <Layer>
-          {/* ORIGINAL IMAGE — drawn at native size, the visual source of truth */}
+          {/* BASE — the original image, the only visual source of truth */}
           <Image
             image={backgroundImage}
             x={0}
@@ -285,44 +300,33 @@ export default function App() {
             listening={false}
           />
 
-          {/* CLICK ZONES (native coords now align with the background) */}
-          {layers
-            .filter((layer) => !layer.edited)
-            .map((layer) => (
-              <Rect
-                key={`click-${layer.id}`}
-                x={layer.x}
-                y={layer.y}
-                width={layer.width}
-                height={layer.height}
-                fill="transparent"
-                listening
-                onClick={() => {
-                  setLayers((prev) =>
-                    prev.map((l) =>
-                      l.id === layer.id ? { ...l, edited: true } : l
-                    )
-                  );
-                }}
-              />
-            ))}
-
-          {/* EDITED OBJECTS */}
-          {layers
-            .filter((layer) => layer.edited === true)
-            .map((layer) => (
+          {/* LIFTED SMART OBJECTS (resolved by the Visual Object Resolver) */}
+          {scene.activeVisuals.map((v) => {
+            const t = v.transform;
+            const shapeProps = {
+              id: v.objectId,
+              file: v.file,
+              type: v.isText ? "text" : v.category,
+              text: v.text,
+              x: t.x,
+              y: t.y,
+              width: t.width,
+              height: t.height,
+              rotation: t.rotation,
+              fontFamily: v.style?.fontFamily,
+              fontColor: v.style?.fontColor,
+              strokeColor: v.style?.strokeColor,
+              strokeWidth: v.style?.strokeWidth,
+            };
+            return (
               <EditableLayer
-                key={layer.id}
-                shapeProps={layer}
-                isSelected={selectedId === layer.id}
-                onSelect={() => setSelectedId(layer.id)}
-                onChange={(newAttrs) => {
-                  setLayers((prev) =>
-                    prev.map((l) => (l.id === layer.id ? newAttrs : l))
-                  );
-                }}
+                key={v.objectId}
+                shapeProps={shapeProps}
+                isSelected={session.selectedId === v.objectId}
+                onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
               />
-            ))}
+            );
+          })}
         </Layer>
       </Stage>
     </div>

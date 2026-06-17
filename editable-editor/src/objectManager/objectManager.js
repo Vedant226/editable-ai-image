@@ -13,7 +13,10 @@ import { ROLE } from "./vocabulary.js";
 import { contains } from "./geometry.js";
 import { deriveModel } from "./derive.js";
 
-const IDENTITY = (o) => ({ x: o.bbox.x, y: o.bbox.y, scaleX: 1, scaleY: 1, rotation: o.rotation });
+// Initial transform = the object sitting exactly on its native footprint, so
+// the lift is visually seamless. Geometry is width/height (not scale) to match
+// the canvas's transform model.
+const IDENTITY = (o) => ({ x: o.bbox.x, y: o.bbox.y, width: o.bbox.w, height: o.bbox.h, rotation: o.rotation });
 
 export function createObjectManager(rawMetadata, options = {}) {
   const model = deriveModel(rawMetadata, options);
@@ -96,12 +99,17 @@ export function createObjectManager(rawMetadata, options = {}) {
     activate: (session, id) => {
       const obj = resolve(id);
       if (!obj || !obj.editable) return { session, repairRequest: null };
-      const entry = session.entries[obj.id] || { objectId: obj.id, transform: IDENTITY(obj) };
-      const next = {
-        ...session,
-        selectedId: obj.id,
-        entries: { ...session.entries, [obj.id]: { ...entry, state: "active", deleted: false } },
-      };
+      // v1 rule: never lift an object together with its own parent or child
+      // (knockout compositing is deferred). Deactivate conflicting relatives.
+      const entries = { ...session.entries };
+      for (const key of Object.keys(entries)) {
+        const other = objects.get(Number(key));
+        if (!other || other.id === obj.id) continue;
+        if (other.parentId === obj.id || obj.parentId === other.id) delete entries[key];
+      }
+      const entry = entries[obj.id] || { objectId: obj.id, transform: IDENTITY(obj) };
+      entries[obj.id] = { ...entry, state: "active", deleted: false };
+      const next = { ...session, selectedId: obj.id, entries };
       // mask geometry is the Visual Object Resolver's job (Phase 3); bbox-level for now.
       const repairRequest = { objectId: obj.id, bbox: { ...obj.bbox }, reason: "activate-lift" };
       return { session: next, repairRequest };

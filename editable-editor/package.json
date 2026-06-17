@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "om:report": "node scripts/report.js"
+    "om:report": "node scripts/report.js",
+    "om:test": "node scripts/selftest.js"
   },
   "dependencies": {
     "konva": "^9.3.22",
