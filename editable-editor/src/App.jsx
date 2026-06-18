@@ -451,11 +451,20 @@ export default function App() {
   const deleteSelected = useCallback(() => {
     const id = session.selectedId;
     if (id == null || !om) return;
-    eie.delete(id, performance.now());
-    kick();
-    const ms = eie.config.deleteMs + 40;
-    setTimeout(() => commit((s) => om.select(om.softDelete(s, id), null)), ms);
-  }, [session.selectedId, om, eie, kick, commit]);
+    prefetchLift(id); // ensure a footprint fill exists so deletion never reveals a hole
+    let tries = 0;
+    const run = () => {
+      if (liftAssetsRef.current.get(id)?.fill) {
+        eie.delete(id, performance.now());
+        kick();
+        setTimeout(() => commit((s) => om.select(om.softDelete(s, id), null)), eie.config.deleteMs + 40);
+      } else if (tries++ < 25 && backendReadyRef.current) {
+        setTimeout(run, 120); // wait for the fill
+      }
+      // else (no backend / fill unavailable): leave the object in place rather than expose a hole
+    };
+    run();
+  }, [session.selectedId, om, eie, kick, commit, prefetchLift]);
 
   const bringToFront = useCallback(() => {
     const id = session.selectedId;
