@@ -30,12 +30,14 @@ function KImage({ url, ...props }) {
    selection. Drag/transform model is unchanged from Phase 5.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, lifted, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, lifted, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
   const [image] = useImage(cutoutUrl || `/layers/${encodeURIComponent(shapeProps.file || "")}`);
 
   const shapeRef = useRef(null);
   const trRef = useRef(null);
   const isText = shapeProps.type?.toLowerCase().includes("text");
+  // tf=0 → show original bitmap; tf=1 → show synthesized text; in between = crossfade
+  const tf = isText ? (textFade ?? (edited ? 1 : 0)) : 0;
 
   useEffect(() => {
     if (isSelected && lifted && !isEditing && trRef.current && shapeRef.current) {
@@ -69,8 +71,8 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, lifted, glow
 
   return (
     <>
-      {/* image, OR unedited text rendered as its ORIGINAL bitmap (identical to source) */}
-      {(!isText || !edited) && image && (
+      {/* image, OR text's ORIGINAL bitmap (identical to source; fades out as synth text fades in) */}
+      {(!isText || tf < 1) && image && (
         <Image
           ref={shapeRef}
           image={image}
@@ -80,7 +82,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, lifted, glow
           width={shapeProps.width}
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
-          opacity={opacity ?? 1}
+          opacity={(opacity ?? 1) * (isText ? 1 - tf : 1)}
           draggable={lifted}
           onDblClick={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
           onDblTap={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
@@ -101,7 +103,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, lifted, glow
           width={shapeProps.width}
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
-          opacity={opacity ?? 1}
+          opacity={(opacity ?? 1) * tf}
           fontFamily={shapeProps.fontFamily || "Cinzel"}
           fontStyle="bold"
           fontSize={Math.max(14, shapeProps.height * 0.55)}
@@ -229,6 +231,8 @@ export default function App() {
   const liftAssetsRef = useRef(new Map()); // id -> { cutout:{url}, fill:{url,x,y,w,h}, shadow, readyAt } | {pending|failed}
   const prevSelRef = useRef(null);
   const lastHoverRef = useRef(0);
+  const editedAtRef = useRef(new Map()); // text id -> time of first edit (bitmap→text crossfade)
+  const TEXT_FADE_MS = 260;
 
   // Editing Illusion Engine (stateful; created once)
   const eieRef = useRef(null);
@@ -245,7 +249,14 @@ export default function App() {
       clockRef.current = now;
       eie.tick(now);
       forceTick();
-      if (eie.isAnimating(now)) requestAnimationFrame(step);
+      let textFading = false;
+      for (const ea of editedAtRef.current.values()) {
+        if (now - ea < TEXT_FADE_MS) {
+          textFading = true;
+          break;
+        }
+      }
+      if (eie.isAnimating(now) || textFading) requestAnimationFrame(step);
       else rafRunningRef.current = false;
     };
     requestAnimationFrame(step);
@@ -429,9 +440,11 @@ export default function App() {
       if (id == null || !om) return;
       const v = (value ?? "").trim();
       if (!v) return;
+      if (!editedAtRef.current.has(id)) editedAtRef.current.set(id, performance.now()); // start bitmap→text crossfade
       commit((s) => om.setText(s, id, v));
+      kick();
     },
-    [editingId, om, commit]
+    [editingId, om, commit, kick]
   );
 
   // ---- toolbar actions ----
@@ -647,6 +660,9 @@ export default function App() {
             const t = v.transform;
             const fr = eie.frame(v.objectId, now);
             const a = liftAssetsRef.current.get(v.objectId);
+            const editedFlag = session.entries[v.objectId]?.text != null;
+            const ea = editedAtRef.current.get(v.objectId);
+            const textFade = editedFlag ? (ea ? Math.min(1, (now - ea) / TEXT_FADE_MS) : 1) : 0;
             const shapeProps = {
               id: v.objectId,
               file: v.file,
@@ -668,7 +684,8 @@ export default function App() {
                 shapeProps={shapeProps}
                 isSelected={session.selectedId === v.objectId}
                 isEditing={editingId === v.objectId}
-                edited={session.entries[v.objectId]?.text != null}
+                edited={editedFlag}
+                textFade={textFade}
                 lifted={!!(a && a.fill)}
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
                 opacity={fr ? fr.cutout.opacity : 1}
