@@ -30,7 +30,7 @@ function KImage({ url, ...props }) {
    selection. Drag/transform model is unchanged from Phase 5.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, lifted, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
   const [image] = useImage(cutoutUrl || `/layers/${encodeURIComponent(shapeProps.file || "")}`);
 
   const shapeRef = useRef(null);
@@ -38,11 +38,11 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, glow, opacit
   const isText = shapeProps.type?.toLowerCase().includes("text");
 
   useEffect(() => {
-    if (isSelected && !isEditing && trRef.current && shapeRef.current) {
+    if (isSelected && lifted && !isEditing && trRef.current && shapeRef.current) {
       trRef.current.nodes([shapeRef.current]);
       trRef.current.getLayer()?.batchDraw();
     }
-  }, [isSelected, isEditing]);
+  }, [isSelected, isEditing, lifted]);
 
   const glowProps =
     glow > 0.01
@@ -81,7 +81,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, glow, opacit
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
           opacity={opacity ?? 1}
-          draggable
+          draggable={lifted}
           onDblClick={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
           onDblTap={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
           onDragEnd={updatePosition}
@@ -109,7 +109,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, glow, opacit
           stroke={shapeProps.strokeColor || "#5a2e12"}
           strokeWidth={shapeProps.strokeWidth || 1}
           align="center"
-          draggable
+          draggable={lifted}
           onDblClick={() => onStartTextEdit?.(shapeProps.id)}
           onDblTap={() => onStartTextEdit?.(shapeProps.id)}
           onDragEnd={updatePosition}
@@ -118,7 +118,8 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, glow, opacit
         />
       )}
 
-      {isSelected && !isEditing && <Transformer ref={trRef} rotateEnabled />}
+      {/* transformer only on the SELECTED + LIFTED object (never before its footprint is covered) */}
+      {isSelected && lifted && !isEditing && <Transformer ref={trRef} rotateEnabled />}
     </>
   );
 }
@@ -227,6 +228,7 @@ export default function App() {
   const backendReadyRef = useRef(false);
   const liftAssetsRef = useRef(new Map()); // id -> { cutout:{url}, fill:{url,x,y,w,h}, shadow, readyAt } | {pending|failed}
   const prevSelRef = useRef(null);
+  const lastHoverRef = useRef(0);
 
   // Editing Illusion Engine (stateful; created once)
   const eieRef = useRef(null);
@@ -384,6 +386,23 @@ export default function App() {
     [om, isOpaqueAt, session.selectedId, session.entries, commit, update, prefetchLift]
   );
 
+  // Warm the lift package for the object under the cursor so the lift is instant
+  // on click/drag (the footprint fill is ready before displacement is allowed).
+  const handleStageHover = useCallback(
+    (e) => {
+      if (!om || !backendReadyRef.current) return;
+      const t = performance.now();
+      if (t - lastHoverRef.current < 100) return;
+      lastHoverRef.current = t;
+      const stage = e.target.getStage();
+      const point = stage && stage.getRelativePointerPosition();
+      if (!point) return;
+      const picked = om.pickAt(point, { isOpaqueAt });
+      if (picked) prefetchLift(picked.id);
+    },
+    [om, isOpaqueAt, prefetchLift]
+  );
+
   const handleObjectChange = useCallback(
     (id, attrs, prevText) =>
       commit((s) => {
@@ -500,6 +519,7 @@ export default function App() {
   const now = clockRef.current;
   const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
   const selectedVisual = selected && vr ? vr.resolve(selected.id, session) : null;
+  const selectedLifted = selected ? !!liftAssetsRef.current.get(selected.id)?.fill : false;
 
   // fills: cover lifted footprints (active) and erased footprints (deleted)
   const fills = [];
@@ -552,6 +572,7 @@ export default function App() {
     >
       <div style={{ ...chip, position: "absolute", top: 12, left: 12, zIndex: 10, pointerEvents: "none" }}>
         {selected ? `selected: ${selected.category}#${selected.id}` : "click an object to lift it"}
+        {selected && !selectedLifted ? "  ·  lifting…" : ""}
         {selected?.role === "text" ? "  ·  double-click to edit" : ""}
         {`  ·  lift: ${liftEngine || "offline"}`}
       </div>
@@ -610,6 +631,7 @@ export default function App() {
         scaleY={scale}
         onClick={handleStageClick}
         onTap={handleStageClick}
+        onMouseMove={handleStageHover}
       >
         <Layer>
           {/* BASE — the original image, the only visual source of truth */}
@@ -647,6 +669,7 @@ export default function App() {
                 isSelected={session.selectedId === v.objectId}
                 isEditing={editingId === v.objectId}
                 edited={session.entries[v.objectId]?.text != null}
+                lifted={!!(a && a.fill)}
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
                 opacity={fr ? fr.cutout.opacity : 1}
                 cutoutUrl={!v.isText && a && a.cutout ? a.cutout.url : null}
