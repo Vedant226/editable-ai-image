@@ -13,13 +13,20 @@ import useImage from "use-image";
 import { createObjectManager } from "./objectManager";
 import { createVisualResolver } from "./visualResolver";
 import { useAlphaHitTester } from "./useAlphaHitTester";
-import { createEditingIllusionEngine } from "./editingIllusion";
+import { createEditingIllusionEngine, PHASE } from "./editingIllusion";
 
-/* A Konva image bound to a (possibly dynamic) URL; renders nothing until loaded. */
-function KImage({ url, ...props }) {
-  const [img] = useImage(url);
-  if (!img) return null;
-  return <Image image={img} {...props} />;
+/* Decode an image URL/data-URL to a ready-to-paint HTMLImageElement (or null on
+   failure). Used so lift bitmaps are decoded BEFORE a node depends on them — a
+   node never has to mount against a not-yet-loaded image (which would blank a
+   frame and, mid-drag, orphan the Konva node). */
+function decodeImage(url) {
+  return new Promise((resolve) => {
+    if (!url) return resolve(null);
+    const img = new window.Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
 }
 
 /* ==========================
@@ -32,24 +39,36 @@ function KImage({ url, ...props }) {
    begins on the FIRST drag/transform via `onLiftStart`, never on selection.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutUrl, onChange, onStartTextEdit, onLiftStart }) {
-  const [image] = useImage(cutoutUrl || `/layers/${encodeURIComponent(shapeProps.file || "")}`);
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, onChange, onStartTextEdit, onLiftStart }) {
+  // The resting highlight draws the ORIGINAL /layers PNG (closest to the base);
+  // the refined /lift cutout (decoded element, passed in) is used only once
+  // lifted. Because both are READY HTMLImageElements, swapping between them
+  // keeps the SAME Konva node mounted — a drag in progress is never orphaned.
+  const [layerImage] = useImage(`/layers/${encodeURIComponent(shapeProps.file || "")}`);
+  const image = cutoutImg || layerImage;
 
-  const shapeRef = useRef(null);
+  const shapeRef = useRef(null); // the <Image> (bitmap / cutout)
+  const textRef = useRef(null); // the synthesized <Text> (separate ref: unmounting the Image must not null it)
   const trRef = useRef(null);
   const isText = shapeProps.type?.toLowerCase().includes("text");
   // tf=0 → show original bitmap; tf=1 → show synthesized text; in between = crossfade
   const tf = isText ? (textFade ?? (edited ? 1 : 0)) : 0;
+  const imageReady = !!image;
+  // the node the transformer/handlers act on: the synth Text once editing has
+  // taken over, otherwise the bitmap/cutout Image
+  const activeNode = () => (isText && edited && textRef.current ? textRef.current : shapeRef.current);
 
   // Transformer is an affordance on the selected object, but only once the lift
-  // package is ready (so acting on a handle can cover the footprint, never a
-  // hole) and only when a real node exists (shapeRef) → no empty transformer box.
+  // package is ready (so acting on a handle covers the footprint, never a hole)
+  // and only once a real node exists (imageReady) → never an empty transformer
+  // box; re-attaches when the node appears or the Image↔Text node changes.
   useEffect(() => {
-    if (isSelected && manipulable && !isEditing && trRef.current && shapeRef.current) {
-      trRef.current.nodes([shapeRef.current]);
+    const node = activeNode();
+    if (isSelected && manipulable && !isEditing && imageReady && trRef.current && node) {
+      trRef.current.nodes([node]);
       trRef.current.getLayer()?.batchDraw();
     }
-  }, [isSelected, isEditing, manipulable]);
+  }, [isSelected, isEditing, manipulable, imageReady, edited]);
 
   const glowProps =
     glow > 0.01
@@ -60,7 +79,8 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
   const updatePosition = (e) => onChange({ ...shapeProps, x: e.target.x(), y: e.target.y() });
 
   const handleTransform = () => {
-    const node = shapeRef.current;
+    const node = activeNode();
+    if (!node) return;
     const scaleX = node.scaleX();
     const scaleY = node.scaleY();
     node.scaleX(1);
@@ -103,7 +123,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
       {/* once the user edits text, synthesize typography from the font estimation */}
       {isText && edited && (
         <Text
-          ref={shapeRef}
+          ref={textRef}
           visible={!isEditing}
           text={shapeProps.text || "Edit me"}
           x={shapeProps.x}
@@ -130,8 +150,9 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
         />
       )}
 
-      {/* transformer on the SELECTED object once its footprint can be covered (lift package ready) */}
-      {isSelected && manipulable && !isEditing && <Transformer ref={trRef} rotateEnabled />}
+      {/* transformer on the SELECTED object once its footprint can be covered
+          (lift package ready) AND a real node exists (no empty box) */}
+      {isSelected && manipulable && !isEditing && imageReady && <Transformer ref={trRef} rotateEnabled />}
     </>
   );
 }
@@ -351,7 +372,7 @@ export default function App() {
     async (id) => {
       if (!backendReadyRef.current) return;
       const cached = liftAssetsRef.current.get(id);
-      if (cached && cached.cutout) {
+      if (cached && cached.readyAt) {
         eie.setAssets(id, "ready", performance.now());
         return;
       }
@@ -365,10 +386,22 @@ export default function App() {
         });
         if (!res.ok) throw new Error(`lift ${res.status}`);
         const p = await res.json();
+        // DECODE the bitmaps before exposing the object as ready. fillReady (and
+        // hence draggable/transformable + the synth-text swap) must mean "can be
+        // PAINTED this frame", not merely "URL known" — otherwise the footprint
+        // fill / refined cutout blanks for a frame on first use (orphaned drag,
+        // ghosted text). We hand React the decoded elements, so no async re-load.
+        const [cutoutImg, fillImg, shadowImg] = await Promise.all([
+          decodeImage(p.cutout?.png),
+          decodeImage(p.fill?.png),
+          decodeImage(p.shadow?.png),
+        ]);
         liftAssetsRef.current.set(id, {
-          cutout: { url: p.cutout.png },
-          fill: { url: p.fill.png, x: p.fill.x, y: p.fill.y, w: p.fill.w, h: p.fill.h },
-          shadow: p.shadow,
+          cutout: cutoutImg ? { url: p.cutout.png, img: cutoutImg } : null,
+          fill: fillImg
+            ? { url: p.fill.png, img: fillImg, x: p.fill.x, y: p.fill.y, w: p.fill.w, h: p.fill.h }
+            : null,
+          shadow: shadowImg && p.shadow ? { ...p.shadow, img: shadowImg } : null,
           readyAt: performance.now(),
         });
         eie.setAssets(id, "ready", performance.now());
@@ -497,14 +530,22 @@ export default function App() {
     run();
   }, [session.selectedId, om, eie, kick, commit, prefetchLift]);
 
-  const bringToFront = useCallback(() => {
-    const id = session.selectedId;
-    if (id != null && om) commit((s) => om.bringToFront(s, id));
-  }, [session.selectedId, om, commit]);
-  const sendToBack = useCallback(() => {
-    const id = session.selectedId;
-    if (id != null && om) commit((s) => om.sendToBack(s, id));
-  }, [session.selectedId, om, commit]);
+  // z-order acts on a lifted object; a resting selection is activated first so
+  // the button is never a dead affordance (re-ordering doesn't displace the
+  // object, so it needs no fill — identity at rest is preserved either way).
+  const reorder = useCallback(
+    (which) => {
+      const id = session.selectedId;
+      if (id == null || !om) return;
+      commit((s) => {
+        const base = s.entries[id]?.state === "active" ? s : om.activate(s, id).session;
+        return which === "front" ? om.bringToFront(base, id) : om.sendToBack(base, id);
+      });
+    },
+    [session.selectedId, om, commit]
+  );
+  const bringToFront = useCallback(() => reorder("front"), [reorder]);
+  const sendToBack = useCallback(() => reorder("back"), [reorder]);
 
   // ---- keyboard ----
   useEffect(() => {
@@ -607,12 +648,12 @@ export default function App() {
   for (const v of scene.activeVisuals) {
     const a = liftAssetsRef.current.get(v.objectId);
     const o = om && om.getObject(v.objectId);
-    if (a && a.shadow && a.shadow.png && o) {
+    if (a && a.shadow && a.shadow.img && o) {
       const dx = v.transform.x - o.bbox.x;
       const dy = v.transform.y - o.bbox.y;
       const op = (a.shadow.opacity ?? 0.4) * Math.min(1, Math.hypot(dx, dy) / 40);
       if (op > 0.01) {
-        shadows.push({ id: v.objectId, url: a.shadow.png, x: a.shadow.x + dx, y: a.shadow.y + dy, w: a.shadow.w, h: a.shadow.h, opacity: op });
+        shadows.push({ id: v.objectId, img: a.shadow.img, x: a.shadow.x + dx, y: a.shadow.y + dy, w: a.shadow.w, h: a.shadow.h, opacity: op });
       }
     }
   }
@@ -720,14 +761,15 @@ export default function App() {
           {/* BASE — the original image, the only visual source of truth */}
           <Image image={backgroundImage} x={0} y={0} width={imageSize.width} height={imageSize.height} listening={false} />
 
-          {/* REPAIR FILLS — inpainted patches covering lifted/erased footprints */}
+          {/* REPAIR FILLS — inpainted patches covering lifted/erased footprints
+              (decoded elements, so a fill paints the SAME frame it is requested) */}
           {fills.map((f) => (
-            <KImage key={`fill-${f.id}`} url={f.url} x={f.x} y={f.y} width={f.w} height={f.h} listening={false} />
+            <Image key={`fill-${f.id}`} image={f.img} x={f.x} y={f.y} width={f.w} height={f.h} listening={false} />
           ))}
 
           {/* GROUNDING SHADOWS — attached, fade in on drag */}
           {shadows.map((s) => (
-            <KImage key={`shadow-${s.id}`} url={s.url} x={s.x} y={s.y} width={s.w} height={s.h} opacity={s.opacity} listening={false} />
+            <Image key={`shadow-${s.id}`} image={s.img} x={s.x} y={s.y} width={s.w} height={s.h} opacity={s.opacity} listening={false} />
           ))}
 
           {/* SELECTED / LIFTED SMART OBJECTS */}
@@ -739,16 +781,21 @@ export default function App() {
             const isActive = entry?.state === "active";
             const fillReady = !!(a && a.fill);
             // text becomes synthesized typography only once edited AND its
-            // footprint can be covered (else the original would ghost through)
+            // footprint fill is PAINTABLE (decoded) — else the original ghosts
+            // through (fillReady = decoded element present, not just URL known)
             const editedFlag = entry?.text != null && (!v.isText || fillReady);
             // start the bitmap→text cross-fade exactly when the synth text first
-            // shows (fill ready), so it eases in rather than snapping
+            // shows, so it eases in; clear it when not shown so a later
+            // (re)appearance (redo / re-edit) eases again rather than snapping
             if (editedFlag && !editedAtRef.current.has(v.objectId)) editedAtRef.current.set(v.objectId, now);
+            else if (!editedFlag && editedAtRef.current.has(v.objectId)) editedAtRef.current.delete(v.objectId);
             const ea = editedAtRef.current.get(v.objectId);
             const textFade = editedFlag ? (ea ? Math.min(1, (now - ea) / TEXT_FADE_MS) : 1) : 0;
-            // RESTING-selected highlight draws at full opacity (it equals the
-            // base); only a lifted object follows the engine's cutout opacity.
-            const opacity = isActive ? (fr ? fr.cutout.opacity : 1) : 1;
+            // Opacity follows the engine only for a genuinely lifted phase; a
+            // RESTING frame (selection highlight OR active-but-not-yet-lifted)
+            // draws at full opacity (≡ the base). DELETING fades even on a never-
+            // activated object (delete a resting selection → it still dissolves).
+            const opacity = fr && fr.phase !== PHASE.RESTING ? fr.cutout.opacity : 1;
             const shapeProps = {
               id: v.objectId,
               file: v.file,
@@ -775,7 +822,7 @@ export default function App() {
                 manipulable={fillReady}
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
                 opacity={opacity}
-                cutoutUrl={!v.isText && isActive && a && a.cutout ? a.cutout.url : null}
+                cutoutImg={!v.isText && isActive && a && a.cutout ? a.cutout.img : null}
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
                 onStartTextEdit={startTextEdit}
                 onLiftStart={liftStart}
