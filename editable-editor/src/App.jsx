@@ -556,6 +556,22 @@ export default function App() {
     }
   }
 
+  // attached grounding shadows — invisible at rest (identity preserved), fade in
+  // as an object is dragged off its footprint (the "lifted off the image" cue)
+  const shadows = [];
+  for (const v of scene.activeVisuals) {
+    const a = liftAssetsRef.current.get(v.objectId);
+    const o = om && om.getObject(v.objectId);
+    if (a && a.shadow && a.shadow.png && o) {
+      const dx = v.transform.x - o.bbox.x;
+      const dy = v.transform.y - o.bbox.y;
+      const op = (a.shadow.opacity ?? 0.4) * Math.min(1, Math.hypot(dx, dy) / 40);
+      if (op > 0.01) {
+        shadows.push({ id: v.objectId, url: a.shadow.png, x: a.shadow.x + dx, y: a.shadow.y + dy, w: a.shadow.w, h: a.shadow.h, opacity: op });
+      }
+    }
+  }
+
   // inline editor screen rect
   let editor = null;
   if (editingId != null && om && stageRef.current) {
@@ -662,6 +678,11 @@ export default function App() {
           {/* REPAIR FILLS — inpainted patches covering lifted/erased footprints */}
           {fills.map((f) => (
             <KImage key={`fill-${f.id}`} url={f.url} x={f.x} y={f.y} width={f.w} height={f.h} listening={false} />
+          ))}
+
+          {/* GROUNDING SHADOWS — attached, fade in on drag */}
+          {shadows.map((s) => (
+            <KImage key={`shadow-${s.id}`} url={s.url} x={s.x} y={s.y} width={s.w} height={s.h} opacity={s.opacity} listening={false} />
           ))}
 
           {/* LIFTED SMART OBJECTS */}
