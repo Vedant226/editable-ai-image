@@ -24,13 +24,15 @@ function KImage({ url, ...props }) {
 
 /* ==========================
    EDITABLE LAYER
-   One lifted Smart Object. Its pixels are the refined /lift CUTOUT once ready
-   (a drop-in for the old SAM PNG at the same footprint), else the SAM PNG as an
-   instant stand-in. A matte-hugging glow (Konva shadow over the alpha) marks
-   selection. Drag/transform model is unchanged from Phase 5.
+   The node for the SELECTED and/or LIFTED object. While RESTING-selected it
+   draws the object's ORIGINAL pixels in place at full opacity (visually
+   identical to the base — selection never changes pixels) with a matte-hugging
+   glow. It only becomes draggable/transformable once its footprint can be
+   covered (`manipulable` = lift package ready); the actual lift (fill + float)
+   begins on the FIRST drag/transform via `onLiftStart`, never on selection.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, lifted, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutUrl, onChange, onStartTextEdit, onLiftStart }) {
   const [image] = useImage(cutoutUrl || `/layers/${encodeURIComponent(shapeProps.file || "")}`);
 
   const shapeRef = useRef(null);
@@ -39,18 +41,22 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, li
   // tf=0 → show original bitmap; tf=1 → show synthesized text; in between = crossfade
   const tf = isText ? (textFade ?? (edited ? 1 : 0)) : 0;
 
+  // Transformer is an affordance on the selected object, but only once the lift
+  // package is ready (so acting on a handle can cover the footprint, never a
+  // hole) and only when a real node exists (shapeRef) → no empty transformer box.
   useEffect(() => {
-    if (isSelected && lifted && !isEditing && trRef.current && shapeRef.current) {
+    if (isSelected && manipulable && !isEditing && trRef.current && shapeRef.current) {
       trRef.current.nodes([shapeRef.current]);
       trRef.current.getLayer()?.batchDraw();
     }
-  }, [isSelected, isEditing, lifted]);
+  }, [isSelected, isEditing, manipulable]);
 
   const glowProps =
     glow > 0.01
       ? { shadowColor: "#d8b36a", shadowBlur: 6 + glow * 16, shadowOpacity: glow, shadowForStrokeEnabled: false }
       : {};
 
+  const liftStart = () => onLiftStart?.(shapeProps.id);
   const updatePosition = (e) => onChange({ ...shapeProps, x: e.target.x(), y: e.target.y() });
 
   const handleTransform = () => {
@@ -83,10 +89,12 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, li
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
           opacity={(opacity ?? 1) * (isText ? 1 - tf : 1)}
-          draggable={lifted}
+          draggable={manipulable}
           onDblClick={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
           onDblTap={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
+          onDragStart={liftStart}
           onDragEnd={updatePosition}
+          onTransformStart={liftStart}
           onTransformEnd={handleTransform}
           {...glowProps}
         />
@@ -111,17 +119,19 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, li
           stroke={shapeProps.strokeColor || "#5a2e12"}
           strokeWidth={shapeProps.strokeWidth || 1}
           align="center"
-          draggable={lifted}
+          draggable={manipulable}
           onDblClick={() => onStartTextEdit?.(shapeProps.id)}
           onDblTap={() => onStartTextEdit?.(shapeProps.id)}
+          onDragStart={liftStart}
           onDragEnd={updatePosition}
+          onTransformStart={liftStart}
           onTransformEnd={handleTransform}
           {...glowProps}
         />
       )}
 
-      {/* transformer only on the SELECTED + LIFTED object (never before its footprint is covered) */}
-      {isSelected && lifted && !isEditing && <Transformer ref={trRef} rotateEnabled />}
+      {/* transformer on the SELECTED object once its footprint can be covered (lift package ready) */}
+      {isSelected && manipulable && !isEditing && <Transformer ref={trRef} rotateEnabled />}
     </>
   );
 }
@@ -176,7 +186,9 @@ function InlineTextEditor({ rect, fontSize, fontFamily, color, initialValue, onC
         color,
         textAlign: "center",
         lineHeight: 1.05,
-        background: "rgba(10,10,10,0.82)",
+        // translucent so the ORIGINAL bitmap (still in the base) stays visible
+        // behind the edit field until the user confirms
+        background: "rgba(10,10,10,0.35)",
         border: "1px solid #d8b36a",
         outline: "none",
         margin: 0,
@@ -370,7 +382,7 @@ export default function App() {
     [eie, kick]
   );
 
-  // ---- selection ----
+  // ---- selection (NEVER lifts; selection must not modify pixels) ----
   const handleStageClick = useCallback(
     (e) => {
       if (!om) return;
@@ -382,19 +394,12 @@ export default function App() {
       if (!point) return;
 
       const picked = om.pickAt(point, { currentSelectionId: session.selectedId, isOpaqueAt });
-      if (!picked) {
-        update((s) => om.select(s, null));
-        return;
-      }
-      const existing = session.entries[picked.id];
-      if (existing && existing.state === "active") {
-        update((s) => om.select(s, picked.id));
-      } else {
-        commit((s) => om.activate(s, picked.id).session);
-        prefetchLift(picked.id);
-      }
+      // Clicking only SELECTS — the object stays part of the original image (no
+      // activate, no fill, no cutout swap). Lifting happens on drag/transform.
+      update((s) => om.select(s, picked ? picked.id : null));
+      if (picked) prefetchLift(picked.id); // warm the lift package so a later drag is instant
     },
-    [om, isOpaqueAt, session.selectedId, session.entries, commit, update, prefetchLift]
+    [om, isOpaqueAt, session.selectedId, update, prefetchLift]
   );
 
   // Warm the lift package for the object under the cursor so the lift is instant
@@ -414,8 +419,26 @@ export default function App() {
     [om, isOpaqueAt, prefetchLift]
   );
 
+  // ---- lift: the SELECTED→LIFTING transition, triggered by the FIRST drag or
+  // transform (never by selection). The footprint fill is already loaded (the
+  // node is only manipulable once it is), so beginLift covers it before the
+  // object can be displaced — no hole, no duplicate. `update` (not `commit`)
+  // keeps the activation out of history; the committed drop is the undo step.
+  const liftStart = useCallback(
+    (id) => {
+      if (id == null || !om) return;
+      update((s) => {
+        const sel = om.select(s, id);
+        return s.entries[id]?.state === "active" ? sel : om.activate(sel, id).session;
+      });
+      eie.beginLift(id, performance.now());
+      kick();
+    },
+    [om, update, eie, kick]
+  );
+
   const handleObjectChange = useCallback(
-    (id, attrs, prevText) =>
+    (id, attrs, prevText) => {
       commit((s) => {
         let next = om.applyTransform(s, id, {
           x: attrs.x,
@@ -426,8 +449,11 @@ export default function App() {
         });
         if (typeof attrs.text === "string" && attrs.text !== prevText) next = om.setText(next, id, attrs.text);
         return next;
-      }),
-    [om, commit]
+      });
+      eie.drop(id, performance.now()); // FLOATING → SETTLING → PLACED
+      kick();
+    },
+    [om, commit, eie, kick]
   );
 
   // ---- inline text editing ----
@@ -440,11 +466,16 @@ export default function App() {
       if (id == null || !om) return;
       const v = (value ?? "").trim();
       if (!v) return;
-      if (!editedAtRef.current.has(id)) editedAtRef.current.set(id, performance.now()); // start bitmap→text crossfade
-      commit((s) => om.setText(s, id, v));
+      // Confirming the edit lifts the text object so its footprint fill occludes
+      // the ORIGINAL baked bitmap; only then does the bitmap cross-fade to the
+      // synthesized typography (the render gates this on the fill being ready,
+      // so the original never ghosts through). Selection alone never does this.
+      prefetchLift(id);
+      commit((s) => om.setText(om.activate(s, id).session, id, v));
+      eie.beginLift(id, performance.now());
       kick();
     },
-    [editingId, om, commit, kick]
+    [editingId, om, commit, eie, kick, prefetchLift]
   );
 
   // ---- toolbar actions ----
@@ -513,6 +544,7 @@ export default function App() {
     );
     for (const id of active) if (!eie.has(id)) eie.ensurePlaced(id, now);
     for (const id of eie.ids()) {
+      if (id === session.selectedId) continue; // keep the selected object's RESTING glow
       if (!active.has(id) && !session.entries[id]?.deleted) eie.remove(id);
     }
     if (prevSelRef.current !== session.selectedId) {
@@ -542,6 +574,19 @@ export default function App() {
   const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
   const selectedVisual = selected && vr ? vr.resolve(selected.id, session) : null;
   const selectedLifted = selected ? !!liftAssetsRef.current.get(selected.id)?.fill : false;
+
+  // Render the SELECTED object even when it has not been lifted, so it can show
+  // its silhouette glow and be grabbed — drawn from its ORIGINAL pixels in place
+  // (identical to the base), with no fill behind it (the base still owns those
+  // pixels). It joins the lifted objects from the scene.
+  const renderList = [...scene.activeVisuals];
+  if (selected && vr) {
+    const selEntry = session.entries[selected.id];
+    if ((!selEntry || selEntry.state !== "active") && !selEntry?.deleted) {
+      const sv = vr.resolve(selected.id, session);
+      if (sv) renderList.push(sv);
+    }
+  }
 
   // fills: cover lifted footprints (active) and erased footprints (deleted)
   const fills = [];
@@ -609,8 +654,8 @@ export default function App() {
       }}
     >
       <div style={{ ...chip, position: "absolute", top: 12, left: 12, zIndex: 10, pointerEvents: "none" }}>
-        {selected ? `selected: ${selected.category}#${selected.id}` : "click an object to lift it"}
-        {selected && !selectedLifted ? "  ·  lifting…" : ""}
+        {selected ? `selected: ${selected.category}#${selected.id}` : "click an object to select it"}
+        {selected ? (selectedLifted ? "  ·  drag to move" : "  ·  preparing…") : ""}
         {selected?.role === "text" ? "  ·  double-click to edit" : ""}
         {`  ·  lift: ${liftEngine || "offline"}`}
       </div>
@@ -685,14 +730,25 @@ export default function App() {
             <KImage key={`shadow-${s.id}`} url={s.url} x={s.x} y={s.y} width={s.w} height={s.h} opacity={s.opacity} listening={false} />
           ))}
 
-          {/* LIFTED SMART OBJECTS */}
-          {scene.activeVisuals.map((v) => {
+          {/* SELECTED / LIFTED SMART OBJECTS */}
+          {renderList.map((v) => {
             const t = v.transform;
             const fr = eie.frame(v.objectId, now);
             const a = liftAssetsRef.current.get(v.objectId);
-            const editedFlag = session.entries[v.objectId]?.text != null;
+            const entry = session.entries[v.objectId];
+            const isActive = entry?.state === "active";
+            const fillReady = !!(a && a.fill);
+            // text becomes synthesized typography only once edited AND its
+            // footprint can be covered (else the original would ghost through)
+            const editedFlag = entry?.text != null && (!v.isText || fillReady);
+            // start the bitmap→text cross-fade exactly when the synth text first
+            // shows (fill ready), so it eases in rather than snapping
+            if (editedFlag && !editedAtRef.current.has(v.objectId)) editedAtRef.current.set(v.objectId, now);
             const ea = editedAtRef.current.get(v.objectId);
             const textFade = editedFlag ? (ea ? Math.min(1, (now - ea) / TEXT_FADE_MS) : 1) : 0;
+            // RESTING-selected highlight draws at full opacity (it equals the
+            // base); only a lifted object follows the engine's cutout opacity.
+            const opacity = isActive ? (fr ? fr.cutout.opacity : 1) : 1;
             const shapeProps = {
               id: v.objectId,
               file: v.file,
@@ -716,12 +772,13 @@ export default function App() {
                 isEditing={editingId === v.objectId}
                 edited={editedFlag}
                 textFade={textFade}
-                lifted={!!(a && a.fill)}
+                manipulable={fillReady}
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
-                opacity={fr ? fr.cutout.opacity : 1}
-                cutoutUrl={!v.isText && a && a.cutout ? a.cutout.url : null}
+                opacity={opacity}
+                cutoutUrl={!v.isText && isActive && a && a.cutout ? a.cutout.url : null}
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
                 onStartTextEdit={startTextEdit}
+                onLiftStart={liftStart}
               />
             );
           })}
