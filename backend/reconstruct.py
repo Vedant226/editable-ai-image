@@ -66,8 +66,11 @@ def harmonize_fill(bg, filled, mask, ring_px=14, feather=9, clip=36.0, strength=
 
 
 def seamless_reconstruct(bg, filled, mask):
-    """Public entry: make the inpaint fill seamless with the original."""
+    """Public entry: make the inpaint fill seamless with the original.
+
+    Fail-safe by contract: ANY error (cv2, shape mismatch, degenerate mask)
+    returns the unmodified fill rather than breaking /lift."""
     try:
         return harmonize_fill(bg, filled, mask)
-    except cv2.error:
+    except Exception:
         return filled
