@@ -76,3 +76,56 @@ TAXONOMY = [
 
 # categories that should default to non-editable (retained, flagged)
 IGNORE_CATEGORIES = {"background", "sky", "cloud", "wall", "floor", "texture"}
+
+# CLIP zero-shot prompt per category (default: "a photo of a {cat}")
+CLIP_PROMPTS = {
+    "text": "text, typography or lettering",
+    "border": "a decorative border",
+    "frame": "an ornate picture frame",
+    "embroidery": "gold embroidery thread",
+    "ornament": "a decorative ornament",
+    "emblem": "an emblem",
+    "crest": "a heraldic crest",
+    "symbol": "a small symbol or icon",
+    "icon": "an icon",
+    "pattern": "a decorative pattern",
+    "crown": "a royal crown",
+    "face": "a human face",
+    "person": "a person or portrait",
+    "robe": "a robe",
+    "gem": "a gemstone or jewel",
+    "texture": "a plain background texture",
+    "background": "a plain background",
+}
+
+# DINO phrase tokens -> taxonomy category (for tokens that aren't categories)
+SYNONYMS = {
+    "man": "person", "woman": "person", "child": "person", "boy": "person", "girl": "person",
+    "portrait": "person", "figure": "person",
+    "robe": "clothing", "dress": "clothing", "coat": "clothing", "cloak": "cape", "garment": "clothing",
+    "necklace": "jewelry", "ring": "jewelry", "pendant": "jewelry",
+    "spear": "weapon", "title": "text", "letter": "text", "number": "text", "word": "text",
+    "halo": "ornament", "flourish": "ornament", "decorative": "ornament",
+    "coat of arms": "crest", "arms": "crest", "badge": "emblem", "shield": "shield",
+    "leaf": "plant", "lion": "animal", "horse": "animal", "bird": "animal",
+}
+
+# importance weight per category (drives the importance score; default 0.6)
+IMPORTANCE_WEIGHTS = {
+    "person": 1.0, "face": 0.95, "head": 0.7, "hair": 0.6, "hand": 0.5, "eye": 0.4,
+    "crown": 0.9, "hat": 0.7, "helmet": 0.7,
+    "sword": 0.85, "weapon": 0.85, "shield": 0.8, "armor": 0.75, "staff": 0.7,
+    "clothing": 0.6, "robe": 0.6, "cape": 0.6, "collar": 0.6,
+    "book": 0.75, "scroll": 0.7, "banner": 0.7,
+    "flower": 0.7, "plant": 0.6, "tree": 0.5, "animal": 0.7,
+    "logo": 0.8, "emblem": 0.82, "crest": 0.82, "badge": 0.78,
+    "ornament": 0.72, "border": 0.65, "frame": 0.5, "embroidery": 0.72, "pattern": 0.6,
+    "symbol": 0.7, "icon": 0.7, "jewelry": 0.75, "gem": 0.7, "decoration": 0.6,
+    "throne": 0.6, "furniture": 0.5, "building": 0.4, "column": 0.4,
+    "text": 0.85,
+    "sky": 0.1, "cloud": 0.1, "background": 0.05, "wall": 0.1, "floor": 0.1, "texture": 0.1,
+}
+
+EDITABLE_MIN_AREA_FRAC = 0.0003  # below this = dust/noise
+EDITABLE_MAX_AREA_FRAC = 0.60    # above this = whole-image/background
+UNCERTAIN_THRESHOLD = 0.50       # confidence below this = flagged uncertain
