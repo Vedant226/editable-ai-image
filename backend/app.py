@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from lama_engine import InpaintEngine
 from matting import refine_matte, decontaminate
 from shadow import synthesize_shadow, shadow_params
+from reconstruct import seamless_reconstruct
 
 LAYERS_DIR = os.path.abspath(
     os.environ.get(
@@ -39,6 +40,7 @@ LAYERS_DIR = os.path.abspath(
 MASK_DILATE = int(os.environ.get("MASK_DILATE", "7"))  # px, hides anti-aliased edges
 CONTEXT_MARGIN = int(os.environ.get("CONTEXT_MARGIN", "64"))  # px of context for LaMa
 FILL_FEATHER = int(os.environ.get("FILL_FEATHER", "9"))  # px collar that blends fill into original
+SEAMLESS = os.environ.get("SEAMLESS", "1") != "0"  # Poisson + colour-match the fill into the original
 
 app = FastAPI(title="Editable AI — Inpaint")
 app.add_middleware(
@@ -205,6 +207,10 @@ def lift(req: LiftRequest):
     if shadow_full is not None:
         inpaint_mask = np.maximum(inpaint_mask, (shadow_full > 0.06).astype("uint8") * 255)
     filled = inpaint_full(bg, inpaint_mask)
+    # make the reconstruction seamless with the untouched original: colour-match
+    # the fill to the surrounding ring + Poisson-clone so the boundary gradient/
+    # lighting/colour match exactly (no visible seam, no "edited" tell).
+    recon = seamless_reconstruct(bg, filled, inpaint_mask) if SEAMLESS else filled
 
     # fill patch: opaque over the region, feathering to 0 just outside → blends into original
     fk = FILL_FEATHER | 1
@@ -212,7 +218,7 @@ def lift(req: LiftRequest):
     collar = cv2.GaussianBlur(expanded.astype(np.float32), (fk, fk), 0) / 255.0
     fx0, fy0, fx1, fy1 = _bbox_of(collar > 0.02)
     fill_rgba = np.dstack(
-        [filled[fy0:fy1, fx0:fx1], np.clip(collar[fy0:fy1, fx0:fx1] * 255.0, 0, 255)]
+        [recon[fy0:fy1, fx0:fx1], np.clip(collar[fy0:fy1, fx0:fx1] * 255.0, 0, 255)]
     ).astype("uint8")
 
     # cutout: refined matte × original, decontaminated using the inpaint as background B
