@@ -14,6 +14,7 @@ import { createObjectManager } from "./objectManager";
 import { createVisualResolver } from "./visualResolver";
 import { useAlphaHitTester } from "./useAlphaHitTester";
 import { createEditingIllusionEngine, PHASE } from "./editingIllusion";
+import { estimateTypography } from "./typography";
 
 /* Decode an image URL/data-URL to a ready-to-paint HTMLImageElement (or null on
    failure). Used so lift bitmaps are decoded BEFORE a node depends on them — a
@@ -23,8 +24,18 @@ function decodeImage(url) {
   return new Promise((resolve) => {
     if (!url) return resolve(null);
     const img = new window.Image();
-    img.onload = () => resolve(img);
-    img.onerror = () => resolve(null);
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
+      resolve(v);
+    };
+    // safety timeout: a load/error that never fires must not wedge the object
+    // in a permanent "pending" state (manipulable would never become true)
+    const t = setTimeout(() => finish(null), 8000);
+    img.onload = () => finish(img);
+    img.onerror = () => finish(null);
     img.src = url;
   });
 }
@@ -57,6 +68,25 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
   // the node the transformer/handlers act on: the synth Text once editing has
   // taken over, otherwise the bitmap/cutout Image
   const activeNode = () => (isText && edited && textRef.current ? textRef.current : shapeRef.current);
+
+  // synthesize typography that matches the ORIGINAL bitmap (sampled colour /
+  // gradient, font-family matched by width, size from cap height, outline +
+  // shadow), so edited text reads as the artwork, not as HTML. Recomputed when
+  // the string/footprint changes; falls back to metadata until the bitmap loads.
+  const synthStyle = useMemo(
+    () =>
+      isText && edited && image
+        ? estimateTypography(image, {
+            text: shapeProps.text || "",
+            width: shapeProps.width,
+            height: shapeProps.height,
+            weight: "bold",
+            fallbackFamily: shapeProps.fontFamily,
+            fallbackColor: shapeProps.fontColor,
+          })
+        : null,
+    [isText, edited, image, shapeProps.text, shapeProps.width, shapeProps.height, shapeProps.fontFamily, shapeProps.fontColor]
+  );
 
   // Transformer is an affordance on the selected object, but only once the lift
   // package is ready (so acting on a handle covers the footprint, never a hole)
@@ -132,13 +162,27 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
           opacity={(opacity ?? 1) * tf}
-          fontFamily={shapeProps.fontFamily || "Cinzel"}
+          fontFamily={synthStyle?.fontFamily || shapeProps.fontFamily || "Cinzel"}
           fontStyle="bold"
-          fontSize={Math.max(14, shapeProps.height * 0.55)}
-          fill={shapeProps.fontColor || "#d8b36a"}
-          stroke={shapeProps.strokeColor || "#5a2e12"}
-          strokeWidth={shapeProps.strokeWidth || 1}
+          fontSize={synthStyle?.fontSize || Math.max(14, shapeProps.height * 0.55)}
+          letterSpacing={synthStyle?.letterSpacing || 0}
+          // sampled gold gradient when present, else the sampled/estimated solid fill
+          {...(synthStyle?.gradient
+            ? {
+                fillLinearGradientStartPoint: { x: 0, y: 0 },
+                fillLinearGradientEndPoint: { x: 0, y: shapeProps.height },
+                fillLinearGradientColorStops: synthStyle.gradient,
+              }
+            : { fill: synthStyle?.fill || shapeProps.fontColor || "#d8b36a" })}
+          stroke={synthStyle?.stroke || shapeProps.strokeColor || "#5a2e12"}
+          strokeWidth={synthStyle?.strokeWidth ?? (shapeProps.strokeWidth || 1)}
+          shadowColor={synthStyle?.shadowColor}
+          shadowBlur={synthStyle?.shadowBlur}
+          shadowOpacity={synthStyle?.shadowOpacity}
+          shadowOffsetY={synthStyle?.shadowOffsetY}
           align="center"
+          verticalAlign="middle"
+          wrap="none"
           draggable={manipulable}
           onDblClick={() => onStartTextEdit?.(shapeProps.id)}
           onDblTap={() => onStartTextEdit?.(shapeProps.id)}
@@ -372,7 +416,8 @@ export default function App() {
     async (id) => {
       if (!backendReadyRef.current) return;
       const cached = liftAssetsRef.current.get(id);
-      if (cached && cached.readyAt) {
+      // only a successful, fill-bearing cache counts as done; a prior failure may retry
+      if (cached && cached.readyAt && cached.fill) {
         eie.setAssets(id, "ready", performance.now());
         return;
       }
@@ -396,6 +441,14 @@ export default function App() {
           decodeImage(p.fill?.png),
           decodeImage(p.shadow?.png),
         ]);
+        // the fill is what covers the footprint; if it didn't decode we cannot
+        // lift without exposing a hole — mark failed (retryable) rather than
+        // caching a permanently un-manipulable "ready" record.
+        if (!fillImg) {
+          liftAssetsRef.current.set(id, { failed: true });
+          eie.setAssets(id, "failed", performance.now());
+          return;
+        }
         liftAssetsRef.current.set(id, {
           cutout: cutoutImg ? { url: p.cutout.png, img: cutoutImg } : null,
           fill: fillImg
@@ -639,6 +692,16 @@ export default function App() {
     if (entry.deleted) {
       const a = liftAssetsRef.current.get(entry.objectId);
       if (a && a.fill) fills.push({ id: entry.objectId, ...a.fill });
+    }
+  }
+  // dissolving objects (DELETING, e.g. deleting a never-lifted selection): paint
+  // the fill UNDER the fading cutout so the footprint is covered as the object
+  // dissolves into the background — a clean fade-out, never a pop or a hole.
+  for (const id of eie.ids()) {
+    const fr = eie.frame(id, now);
+    if (fr && fr.phase === PHASE.DELETING) {
+      const a = liftAssetsRef.current.get(id);
+      if (a && a.fill && !fills.some((f) => f.id === id)) fills.push({ id, ...a.fill });
     }
   }
 
