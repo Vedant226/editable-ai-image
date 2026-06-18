@@ -18,6 +18,7 @@ outputs/
 
 # Extraction pipeline intermediate/debug artifacts
 pipeline/_work/
+pipeline/_out/
 
 # OS / editor
 .DS_Store
