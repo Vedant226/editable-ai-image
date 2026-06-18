@@ -20,6 +20,9 @@ outputs/
 pipeline/_work/
 pipeline/_out/
 
+# Large real benchmark sample (copy uploads/test.png here locally to include it)
+pipeline/benchmark_images/bookcover.png
+
 # OS / editor
 .DS_Store
 .vscode/
