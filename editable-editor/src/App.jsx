@@ -257,7 +257,7 @@ export default function App() {
   useEffect(() => {
     fetch("/layers/metadata.json")
       .then((r) => r.json())
-      .then(setRawMetadata)
+      .then((d) => setRawMetadata(Array.isArray(d) ? d : [])) // defensive: tolerate malformed metadata
       .catch((err) => {
         console.error("Failed to load metadata.json", err);
         setRawMetadata([]);

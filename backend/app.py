@@ -123,6 +123,8 @@ def inpaint(req: InpaintRequest):
     obj = META.get(req.objectId)
     if obj is None:
         raise HTTPException(status_code=404, detail=f"object {req.objectId} not found")
+    if not os.path.exists(os.path.join(LAYERS_DIR, obj.get("file", ""))):
+        raise HTTPException(status_code=404, detail=f"layer file missing: {obj.get('file')}")
 
     bg = background_rgb()
     H, W = bg.shape[:2]
@@ -178,6 +180,8 @@ def lift(req: LiftRequest):
     obj = META.get(req.objectId)
     if obj is None:
         raise HTTPException(status_code=404, detail=f"object {req.objectId} not found")
+    if not os.path.exists(os.path.join(LAYERS_DIR, obj.get("file", ""))):
+        raise HTTPException(status_code=404, detail=f"layer file missing: {obj.get('file')}")
 
     bg = background_rgb()
     H, W = bg.shape[:2]

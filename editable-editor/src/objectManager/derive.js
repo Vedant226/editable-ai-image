@@ -32,6 +32,7 @@ export function deriveModel(rawObjects, options = {}) {
 
   // ---- 1. build base ManagedObjects + classify ----
   for (const raw of rawObjects) {
+    if (!raw || raw.id == null || !raw.file) continue; // defensive: skip malformed entries
     const id = raw.id;
     const bbox = { x: num(raw.x), y: num(raw.y), w: num(raw.width), h: num(raw.height) };
     const c = classify(raw.type);
