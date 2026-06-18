@@ -93,8 +93,10 @@ const sceneD = vr.resolveScene(sd);
 check("deleted object renders no active visual", !sceneD.activeVisuals.some((v) => v.objectId === leaf.id));
 check("deleted object still shows its repair patch (erased)", sceneD.repairs.some((r) => r.objectId === leaf.id));
 
-const flower = om.getEditableObjects().find((o) => o.category === "flower");
-let sz = om.activate(om.activate(om.createSession(), flower.id).session, leaf.id).session;
+const second = om
+  .getEditableObjects()
+  .find((o) => o.id !== leaf.id && o.id !== leaf.parentId && o.parentId !== leaf.id);
+let sz = om.activate(om.activate(om.createSession(), second.id).session, leaf.id).session;
 const orderA = vr.resolveScene(sz).activeVisuals.map((v) => v.objectId);
 check("newest activation renders on top", orderA[orderA.length - 1] === leaf.id);
 sz = om.sendToBack(sz, leaf.id);

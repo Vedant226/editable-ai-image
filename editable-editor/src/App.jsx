@@ -30,7 +30,7 @@ function KImage({ url, ...props }) {
    selection. Drag/transform model is unchanged from Phase 5.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, glow, opacity, cutoutUrl, onChange, onStartTextEdit }) {
   const [image] = useImage(cutoutUrl || `/layers/${encodeURIComponent(shapeProps.file || "")}`);
 
   const shapeRef = useRef(null);
@@ -69,10 +69,12 @@ function EditableLayer({ shapeProps, isSelected, isEditing, glow, opacity, cutou
 
   return (
     <>
-      {!isText && image && (
+      {/* image, OR unedited text rendered as its ORIGINAL bitmap (identical to source) */}
+      {(!isText || !edited) && image && (
         <Image
           ref={shapeRef}
           image={image}
+          visible={!(isText && isEditing)}
           x={shapeProps.x}
           y={shapeProps.y}
           width={shapeProps.width}
@@ -80,13 +82,16 @@ function EditableLayer({ shapeProps, isSelected, isEditing, glow, opacity, cutou
           rotation={shapeProps.rotation || 0}
           opacity={opacity ?? 1}
           draggable
+          onDblClick={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
+          onDblTap={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
           onDragEnd={updatePosition}
           onTransformEnd={handleTransform}
           {...glowProps}
         />
       )}
 
-      {isText && (
+      {/* once the user edits text, synthesize typography from the font estimation */}
+      {isText && edited && (
         <Text
           ref={shapeRef}
           visible={!isEditing}
@@ -641,6 +646,7 @@ export default function App() {
                 shapeProps={shapeProps}
                 isSelected={session.selectedId === v.objectId}
                 isEditing={editingId === v.objectId}
+                edited={session.entries[v.objectId]?.text != null}
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
                 opacity={fr ? fr.cutout.opacity : 1}
                 cutoutUrl={!v.isText && a && a.cutout ? a.cutout.url : null}
