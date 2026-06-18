@@ -34,10 +34,12 @@ export function createObjectManager(rawMetadata, options = {}) {
   const editableCanonical = () =>
     order.map((id) => objects.get(id)).filter((o) => o.editable && o.aliasOf == null);
 
-  // selection ranking: most specific, then smallest, then top-most, then id
+  // selection ranking: the SMALLEST object whose mask is under the cursor wins
+  // (so a click selects the real element, never a large enclosing area), with
+  // specificity / top-most as tie-breakers. Re-clicking escalates to the parent.
   const rank = (a, b) =>
-    b.specificity - a.specificity ||
     a.area - b.area ||
+    b.specificity - a.specificity ||
     b.zIndex - a.zIndex ||
     a.id - b.id;
 
