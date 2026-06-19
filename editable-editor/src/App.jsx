@@ -50,7 +50,7 @@ function decodeImage(url) {
    begins on the FIRST drag/transform via `onLiftStart`, never on selection.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, onChange, onStartTextEdit, onLiftStart }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, refText, onChange, onStartTextEdit, onLiftStart }) {
   // The resting highlight draws the ORIGINAL /layers PNG (closest to the base);
   // the refined /lift cutout (decoded element, passed in) is used only once
   // lifted. Because both are READY HTMLImageElements, swapping between them
@@ -78,14 +78,14 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
       isText && edited && image
         ? estimateTypography(image, {
             text: shapeProps.text || "",
+            refText: refText || shapeProps.text || "",
             width: shapeProps.width,
             height: shapeProps.height,
-            weight: "bold",
             fallbackFamily: shapeProps.fontFamily,
             fallbackColor: shapeProps.fontColor,
           })
         : null,
-    [isText, edited, image, shapeProps.text, shapeProps.width, shapeProps.height, shapeProps.fontFamily, shapeProps.fontColor]
+    [isText, edited, image, shapeProps.text, refText, shapeProps.width, shapeProps.height, shapeProps.fontFamily, shapeProps.fontColor]
   );
 
   // Transformer is an affordance on the selected object, but only once the lift
@@ -163,7 +163,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
           rotation={shapeProps.rotation || 0}
           opacity={(opacity ?? 1) * tf}
           fontFamily={synthStyle?.fontFamily || shapeProps.fontFamily || "Cinzel"}
-          fontStyle="bold"
+          fontStyle={synthStyle?.fontStyle || "bold"}
           fontSize={synthStyle?.fontSize || Math.max(14, shapeProps.height * 0.55)}
           letterSpacing={synthStyle?.letterSpacing || 0}
           // sampled gold gradient when present, else the sampled/estimated solid fill
@@ -886,6 +886,7 @@ export default function App() {
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
                 opacity={opacity}
                 cutoutImg={!v.isText && isActive && a && a.cutout ? a.cutout.img : null}
+                refText={v.isText ? om.getObject(v.objectId)?.text : null}
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
                 onStartTextEdit={startTextEdit}
                 onLiftStart={liftStart}
