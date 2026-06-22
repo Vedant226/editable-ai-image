@@ -15,6 +15,8 @@ import { createVisualResolver } from "./visualResolver";
 import { useAlphaHitTester } from "./useAlphaHitTester";
 import { createEditingIllusionEngine, PHASE } from "./editingIllusion";
 import { estimateTypography } from "./typography";
+import PropertyInspector from "./PropertyInspector";
+import { categoryGroup, getActions } from "./propertyRegistry";
 
 /* Decode an image URL/data-URL to a ready-to-paint HTMLImageElement (or null on
    failure). Used so lift bitmaps are decoded BEFORE a node depends on them — a
@@ -600,6 +602,20 @@ export default function App() {
   const bringToFront = useCallback(() => reorder("front"), [reorder]);
   const sendToBack = useCallback(() => reorder("back"), [reorder]);
 
+  // ---- property inspector: dispatch its REAL actions to existing handlers
+  // (placeholder/AI actions are handled inside the panel itself) ----
+  const handlePanelAction = useCallback(
+    (id) => {
+      const sel = session.selectedId;
+      if (sel == null) return;
+      if (id === "replaceText") startTextEdit(sel);
+      else if (id === "front") bringToFront();
+      else if (id === "back") sendToBack();
+      else if (id === "delete") deleteSelected();
+    },
+    [session.selectedId, startTextEdit, bringToFront, sendToBack, deleteSelected]
+  );
+
   // ---- keyboard ----
   useEffect(() => {
     const onKey = (e) => {
@@ -666,7 +682,6 @@ export default function App() {
   const scene = vr ? vr.resolveScene(session) : { activeVisuals: [] };
   const now = clockRef.current;
   const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
-  const selectedVisual = selected && vr ? vr.resolve(selected.id, session) : null;
   const selectedLifted = selected ? !!liftAssetsRef.current.get(selected.id)?.fill : false;
 
   // Render the SELECTED object even when it has not been lifted, so it can show
@@ -745,6 +760,21 @@ export default function App() {
     }
   }
 
+  // property inspector anchor — screen-space rect of the selected object so the
+  // floating panel can sit beside it without covering it
+  let inspectorAnchor = null;
+  if (selected && !editingId && stageRef.current) {
+    const entry = session.entries[selected.id];
+    const t = entry?.transform || { x: selected.bbox.x, y: selected.bbox.y, width: selected.bbox.w, height: selected.bbox.h };
+    const cont = stageRef.current.container().getBoundingClientRect();
+    inspectorAnchor = {
+      left: cont.left + t.x * scale,
+      top: cont.top + t.y * scale,
+      width: t.width * scale,
+      height: t.height * scale,
+    };
+  }
+
   return (
     <div
       style={{
@@ -776,38 +806,18 @@ export default function App() {
         </button>
       </div>
 
-      {selected && !editingId && (
-        <div
-          style={{
-            position: "absolute",
-            bottom: 16,
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 10,
-            display: "flex",
-            gap: 8,
-            padding: 8,
-            background: "rgba(0,0,0,0.55)",
-            borderRadius: 10,
-          }}
-        >
-          {selectedVisual?.caps?.textEditable && (
-            <button onClick={() => startTextEdit(selected.id)} style={btn(true)}>
-              Edit text
-            </button>
-          )}
-          <button onClick={bringToFront} style={btn(true)}>
-            Bring to front
-          </button>
-          <button onClick={sendToBack} style={btn(true)}>
-            Send to back
-          </button>
-          {selectedVisual?.caps?.deletable && (
-            <button onClick={deleteSelected} style={{ ...btn(true), background: "#c0563f", color: "#fff" }}>
-              Delete
-            </button>
-          )}
-        </div>
+      {/* Context-aware property inspector — floats beside the selected object,
+          contents driven by its semantic category (auto-hides when nothing is
+          selected or while inline-editing text). */}
+      {selected && !editingId && inspectorAnchor && (
+        <PropertyInspector
+          key={selected.id}
+          object={selected}
+          panel={getActions(categoryGroup(selected))}
+          anchorRect={inspectorAnchor}
+          viewport={{ w: viewport.w, h: viewport.h }}
+          onAction={handlePanelAction}
+        />
       )}
 
       <Stage
