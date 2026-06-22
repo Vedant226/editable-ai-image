@@ -1,15 +1,18 @@
 /**
  * Property registry — maps an object's SEMANTIC CATEGORY (from the extraction
- * metadata, never an id) to the set of actions its context panel offers.
+ * metadata, never an id) to the set of actions/controls its context panel
+ * offers.
  *
  *   selection → categoryGroup(object) → getActions(group) → context panel
  *
- * `kind: "real"`  actions are wired to existing editor handlers.
- * `kind: "soon"`  actions are genuine, planned capabilities shown with a clean
- *                 placeholder callback — never fake functionality.
+ *   kind: "control"  a live editor control (slider / dropdown / colour / weight)
+ *                    wired to a real style/transform field.
+ *   kind: "real"     a button wired to an existing editor handler.
+ *   kind: "soon"     a genuine planned capability shown with a clean placeholder
+ *                    callback — never fake functionality.
  *
- * Fully generalised: any object whose category doesn't match a specific group
- * falls through to OBJECT, so every editable object gets a sensible panel.
+ * Generalised: any object whose category doesn't match a specific group falls
+ * through to OBJECT, so every editable object gets a sensible panel.
  */
 
 /** Map a logical object → a panel group, purely from its category/role. */
@@ -27,6 +30,16 @@ export function categoryGroup(obj) {
   return "object";
 }
 
+// Families offered in the (searchable) font dropdown. UI concern only — the
+// typography engine still auto-matches the original until the user overrides.
+export const FONT_FAMILIES = [
+  "Cinzel", "Playfair Display", "Trajan Pro", "Cormorant Garamond", "EB Garamond",
+  "Georgia", "Garamond", "Times New Roman", "Baskerville", "Palatino", "Bodoni MT",
+  "serif", "Arial", "Helvetica", "Verdana", "Trebuchet MS", "Courier New", "monospace",
+];
+
+const slider = (field, min, max, step, unit) => ({ type: "slider", field, min, max, step, unit });
+
 // Universal arrange/delete footer — real, available on every object.
 const FOOTER = [
   { id: "front", label: "Bring to front", icon: "⤒", kind: "real" },
@@ -34,25 +47,24 @@ const FOOTER = [
   { id: "delete", label: "Delete", icon: "🗑", kind: "real", danger: true },
 ];
 
-// Category-specific action groups (examples mirror the product spec). Style
-// properties for text are auto-matched by the typography engine today, so they
-// are surfaced as planned manual overrides ("soon"), not faked controls.
 const GROUPS = {
   text: {
     title: "Text",
-    note: "Type is auto-matched to the original artwork.",
+    note: "Type is auto-matched to the original until you override it.",
     actions: [
       { id: "replaceText", label: "Replace text", icon: "✎", kind: "real" },
-      { id: "font", label: "Font", icon: "𝐀", kind: "soon" },
-      { id: "size", label: "Size", icon: "↕", kind: "soon" },
-      { id: "weight", label: "Weight", icon: "𝐁", kind: "soon" },
-      { id: "color", label: "Color", icon: "🎨", kind: "soon" },
+      { id: "font", label: "Font", icon: "𝐀", kind: "control", control: { type: "fontFamily", field: "fontFamily" } },
+      { id: "size", label: "Size", icon: "↕", kind: "control", control: slider("fontSize", 8, 220, 1, "px") },
+      { id: "weight", label: "Weight", icon: "𝐁", kind: "control", control: { type: "weight", field: "fontStyle" } },
+      { id: "color", label: "Color", icon: "🎨", kind: "control", control: { type: "color", field: "fill" } },
+      { id: "spacing", label: "Letter spacing", icon: "⇿", kind: "control", control: slider("letterSpacing", -20, 80, 1, "px") },
+      { id: "lineHeight", label: "Line height", icon: "↥", kind: "control", control: slider("lineHeight", 0.8, 2.5, 0.05, "") },
+      { id: "opacity", label: "Opacity", icon: "◐", kind: "control", control: slider("opacity", 0, 100, 1, "%") },
+      { id: "rotation", label: "Rotation", icon: "⟳", kind: "control", control: slider("rotation", -180, 180, 1, "°") },
       { id: "gradient", label: "Gradient", icon: "▥", kind: "soon" },
       { id: "outline", label: "Outline", icon: "◌", kind: "soon" },
       { id: "shadow", label: "Shadow", icon: "☁", kind: "soon" },
       { id: "align", label: "Alignment", icon: "≡", kind: "soon" },
-      { id: "spacing", label: "Spacing", icon: "⇿", kind: "soon" },
-      { id: "opacity", label: "Opacity", icon: "◐", kind: "soon" },
     ],
   },
   person: {
@@ -63,6 +75,9 @@ const GROUPS = {
       { id: "expression", label: "Change expression", icon: "😊", kind: "soon" },
       { id: "age", label: "Change age", icon: "⏳", kind: "soon" },
       { id: "replacePerson", label: "Replace person", icon: "🔁", kind: "soon" },
+      { id: "opacity", label: "Opacity", icon: "◐", kind: "control", control: slider("opacity", 0, 100, 1, "%") },
+      { id: "rotation", label: "Rotation", icon: "⟳", kind: "control", control: slider("rotation", -180, 180, 1, "°") },
+      { id: "duplicate", label: "Duplicate", icon: "⧉", kind: "real" },
     ],
   },
   face: {
@@ -74,6 +89,9 @@ const GROUPS = {
       { id: "faceHair", label: "Hair", icon: "💇", kind: "soon" },
       { id: "faceAge", label: "Age", icon: "⏳", kind: "soon" },
       { id: "skinTone", label: "Skin tone", icon: "🎨", kind: "soon" },
+      { id: "opacity", label: "Opacity", icon: "◐", kind: "control", control: slider("opacity", 0, 100, 1, "%") },
+      { id: "rotation", label: "Rotation", icon: "⟳", kind: "control", control: slider("rotation", -180, 180, 1, "°") },
+      { id: "duplicate", label: "Duplicate", icon: "⧉", kind: "real" },
     ],
   },
   background: {
@@ -92,18 +110,20 @@ const GROUPS = {
       { id: "replaceLogo", label: "Replace logo", icon: "🔁", kind: "soon" },
       { id: "uploadLogo", label: "Upload logo", icon: "⤴", kind: "soon" },
       { id: "logoColor", label: "Change color", icon: "🎨", kind: "soon" },
-      { id: "logoResize", label: "Resize", icon: "⤡", kind: "soon" },
+      { id: "opacity", label: "Opacity", icon: "◐", kind: "control", control: slider("opacity", 0, 100, 1, "%") },
+      { id: "rotation", label: "Rotation", icon: "⟳", kind: "control", control: slider("rotation", -180, 180, 1, "°") },
+      { id: "duplicate", label: "Duplicate", icon: "⧉", kind: "real" },
     ],
   },
   object: {
     title: "Object",
     actions: [
+      { id: "opacity", label: "Opacity", icon: "◐", kind: "control", control: slider("opacity", 0, 100, 1, "%") },
+      { id: "rotation", label: "Rotation", icon: "⟳", kind: "control", control: slider("rotation", -180, 180, 1, "°") },
+      { id: "duplicate", label: "Duplicate", icon: "⧉", kind: "real" },
       { id: "replace", label: "Replace", icon: "🔁", kind: "soon" },
       { id: "recolor", label: "Recolor", icon: "🎨", kind: "soon" },
       { id: "shadow", label: "Shadow", icon: "☁", kind: "soon" },
-      { id: "opacity", label: "Opacity", icon: "◐", kind: "soon" },
-      { id: "rotate", label: "Rotate", icon: "⟳", kind: "soon" },
-      { id: "duplicate", label: "Duplicate", icon: "⧉", kind: "soon" },
     ],
   },
 };
@@ -114,5 +134,5 @@ export function getActions(group) {
   return { title: g.title, note: g.note || null, actions: [...g.actions, ...FOOTER] };
 }
 
-/** Action ids that are wired to real editor handlers (the rest are placeholders). */
-export const REAL_ACTIONS = new Set(["replaceText", "front", "back", "delete"]);
+/** Action ids wired to real editor handlers (the rest are controls or placeholders). */
+export const REAL_ACTIONS = new Set(["replaceText", "duplicate", "front", "back", "delete"]);

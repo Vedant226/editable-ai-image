@@ -52,7 +52,7 @@ function decodeImage(url) {
    begins on the FIRST drag/transform via `onLiftStart`, never on selection.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, refText, onChange, onStartTextEdit, onLiftStart }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, refText, styleOverride, onChange, onStartTextEdit, onLiftStart }) {
   // The resting highlight draws the ORIGINAL /layers PNG (closest to the base);
   // the refined /lift cutout (decoded element, passed in) is used only once
   // lifted. Because both are READY HTMLImageElements, swapping between them
@@ -164,12 +164,15 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
           height={shapeProps.height}
           rotation={shapeProps.rotation || 0}
           opacity={(opacity ?? 1) * tf}
-          fontFamily={synthStyle?.fontFamily || shapeProps.fontFamily || "Cinzel"}
-          fontStyle={synthStyle?.fontStyle || "bold"}
-          fontSize={synthStyle?.fontSize || Math.max(14, shapeProps.height * 0.55)}
-          letterSpacing={synthStyle?.letterSpacing || 0}
-          // sampled gold gradient when present, else the sampled/estimated solid fill
-          {...(synthStyle?.gradient
+          fontFamily={styleOverride?.fontFamily || synthStyle?.fontFamily || shapeProps.fontFamily || "Cinzel"}
+          fontStyle={styleOverride?.fontStyle || synthStyle?.fontStyle || "bold"}
+          fontSize={styleOverride?.fontSize || synthStyle?.fontSize || Math.max(14, shapeProps.height * 0.55)}
+          letterSpacing={styleOverride?.letterSpacing ?? synthStyle?.letterSpacing ?? 0}
+          lineHeight={styleOverride?.lineHeight ?? 1}
+          // a user colour override beats the sampled gold gradient; else gradient, else sampled solid
+          {...(styleOverride?.fill
+            ? { fill: styleOverride.fill }
+            : synthStyle?.gradient
             ? {
                 fillLinearGradientStartPoint: { x: 0, y: 0 },
                 fillLinearGradientEndPoint: { x: 0, y: shapeProps.height },
@@ -616,6 +619,33 @@ export default function App() {
     [session.selectedId, startTextEdit, bringToFront, sendToBack, deleteSelected]
   );
 
+  // ---- live property controls (opacity / rotation / text style overrides) ----
+  // One history checkpoint at interaction start, then live `update`s (no per-tick
+  // history). Overrides live on the session entry (no OM/typography change): the
+  // object is activated so its fill is in place and the change actually renders.
+  const controlCheckpoint = useCallback(() => {
+    setHistory((h) => ({ past: [...h.past, h.present], present: h.present, future: [] }));
+  }, []);
+  const controlChange = useCallback(
+    (patch) => {
+      const id = session.selectedId;
+      if (id == null || !om) return;
+      prefetchLift(id);
+      update((s) => {
+        const base = s.entries[id]?.state === "active" ? s : om.activate(s, id).session;
+        if ("rotation" in patch) return om.applyTransform(base, id, { rotation: patch.rotation });
+        const e = base.entries[id];
+        if ("opacity" in patch) {
+          const op = Math.max(0, Math.min(1, patch.opacity / 100));
+          return { ...base, entries: { ...base.entries, [id]: { ...e, opacity: op } } };
+        }
+        return { ...base, entries: { ...base.entries, [id]: { ...e, style: { ...(e.style || {}), ...patch } } } };
+      });
+      kick();
+    },
+    [session.selectedId, om, update, prefetchLift, kick]
+  );
+
   // ---- keyboard ----
   useEffect(() => {
     const onKey = (e) => {
@@ -683,6 +713,44 @@ export default function App() {
   const now = clockRef.current;
   const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
   const selectedLifted = selected ? !!liftAssetsRef.current.get(selected.id)?.fill : false;
+
+  // Typography estimate for the SELECTED text → the inspector's default control
+  // values (so Font/Size/Weight/Color start at the auto-matched values). Same
+  // pure function the layer renders with, so the panel and canvas agree.
+  const selIsText = !!(selected && (selected.role === "text" || categoryGroup(selected) === "text"));
+  const selFile = selIsText ? `/layers/${encodeURIComponent(selected.file || "")}` : "";
+  const [selBitmap] = useImage(selFile || undefined);
+  const selText = selected ? (session.entries[selected.id]?.text ?? selected.text) : "";
+  const selSynth = useMemo(
+    () =>
+      selIsText && selBitmap
+        ? estimateTypography(selBitmap, {
+            text: selText || "",
+            refText: selected.text,
+            width: selected.bbox.w,
+            height: selected.bbox.h,
+            fallbackFamily: selected.style?.fontFamily,
+            fallbackColor: selected.style?.fontColor,
+          })
+        : null,
+    [selIsText, selBitmap, selText, selected]
+  );
+
+  // current values for the inspector controls: user override → typography → metadata
+  const selEntry = selected ? session.entries[selected.id] : null;
+  const ov = selEntry?.style || {};
+  const panelValues = selected
+    ? {
+        fontFamily: ov.fontFamily ?? selSynth?.fontFamily ?? selected.style?.fontFamily ?? "serif",
+        fontSize: Math.round(ov.fontSize ?? selSynth?.fontSize ?? selected.bbox.h * 0.6),
+        fontStyle: ov.fontStyle ?? selSynth?.fontStyle ?? "bold",
+        fill: ov.fill ?? selSynth?.fill ?? selected.style?.fontColor ?? "#d8b36a",
+        letterSpacing: Math.round(ov.letterSpacing ?? selSynth?.letterSpacing ?? 0),
+        lineHeight: ov.lineHeight ?? 1,
+        opacity: Math.round((selEntry?.opacity ?? 1) * 100),
+        rotation: Math.round(selEntry?.transform?.rotation ?? selected.rotation ?? 0),
+      }
+    : null;
 
   // Render the SELECTED object even when it has not been lifted, so it can show
   // its silhouette glow and be grabbed — drawn from its ORIGINAL pixels in place
@@ -814,9 +882,12 @@ export default function App() {
           key={selected.id}
           object={selected}
           panel={getActions(categoryGroup(selected))}
+          values={panelValues}
           anchorRect={inspectorAnchor}
           viewport={{ w: viewport.w, h: viewport.h }}
           onAction={handlePanelAction}
+          onControlStart={controlCheckpoint}
+          onControlChange={controlChange}
         />
       )}
 
@@ -869,6 +940,9 @@ export default function App() {
             // draws at full opacity (≡ the base). DELETING fades even on a never-
             // activated object (delete a resting selection → it still dissolves).
             const opacity = fr && fr.phase !== PHASE.RESTING ? fr.cutout.opacity : 1;
+            // user property-inspector overrides (live, stored on the session entry)
+            const userOpacity = entry?.opacity ?? 1;
+            const styleOverride = entry?.style || null;
             const shapeProps = {
               id: v.objectId,
               file: v.file,
@@ -894,9 +968,10 @@ export default function App() {
                 textFade={textFade}
                 manipulable={fillReady}
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
-                opacity={opacity}
+                opacity={opacity * userOpacity}
                 cutoutImg={!v.isText && isActive && a && a.cutout ? a.cutout.img : null}
                 refText={v.isText ? om.getObject(v.objectId)?.text : null}
+                styleOverride={styleOverride}
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
                 onStartTextEdit={startTextEdit}
                 onLiftStart={liftStart}

@@ -1,21 +1,26 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FONT_FAMILIES } from "./propertyRegistry";
 
 /**
- * Context-aware property inspector — a floating glass card that appears beside
- * the selected object. Its contents come from the property registry (driven by
- * the object's semantic category). Real actions call `onAction`; not-yet-built
- * AI actions show a clean inline "coming soon" note (never fake behaviour).
+ * Context-aware property inspector — a floating glass card beside the selected
+ * object. Contents come from the registry (driven by semantic category).
  *
- * Purely presentational + self-positioning. It is keyed by object id in the
- * parent, so selecting a new object remounts it (re-runs the enter animation).
+ *  - kind "control" → a live widget (slider / font dropdown / weight / colour)
+ *    bound to `values`, emitting onControlStart() on interaction begin (history
+ *    checkpoint) and onControlChange(patch) live.
+ *  - kind "real"    → a button → onAction(id).
+ *  - kind "soon"    → a button with a SOON badge → clean inline "coming soon".
+ *
+ * Purely presentational + self-positioning. Keyed by object id in the parent so
+ * selecting a new object remounts it (re-runs the enter animation).
  */
 
-const CARD_W = 250;
+const CARD_W = 268;
 
 const card = {
   position: "fixed",
   width: CARD_W,
-  maxHeight: "78vh",
+  maxHeight: "82vh",
   overflowY: "auto",
   padding: 12,
   borderRadius: 16,
@@ -30,7 +35,7 @@ const card = {
   transition: "opacity 180ms ease, transform 180ms cubic-bezier(.2,.8,.2,1)",
 };
 
-const row = (danger) => ({
+const rowBtn = (danger) => ({
   display: "flex",
   alignItems: "center",
   gap: 10,
@@ -47,45 +52,74 @@ const row = (danger) => ({
   transition: "background 120ms ease",
 });
 
+const ctrlRow = { padding: "6px 8px", marginTop: 4, borderRadius: 10, background: "rgba(255,255,255,0.05)" };
+const ctrlHead = { display: "flex", alignItems: "center", gap: 8, marginBottom: 4, opacity: 0.92 };
+
+function rgbToHex(c) {
+  if (!c) return "#d8b36a";
+  if (c[0] === "#") return c.slice(0, 7);
+  const m = String(c).match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+  if (!m) return "#d8b36a";
+  const h = (n) => Math.max(0, Math.min(255, +n)).toString(16).padStart(2, "0");
+  return `#${h(m[1])}${h(m[2])}${h(m[3])}`;
+}
+
 /** Choose a screen position beside the anchor that doesn't cover it. */
 function place(anchor, vp, h) {
   const GAP = 14, M = 10;
-  let x = anchor.left + anchor.width + GAP; // prefer right of the object
-  if (x + CARD_W > vp.w - M) x = anchor.left - CARD_W - GAP; // flip to the left
-  if (x < M) x = Math.min(Math.max(M, anchor.left), vp.w - CARD_W - M); // last resort: clamp over a side
-  let y = anchor.top + anchor.height / 2 - h / 2; // vertically centred on the object
+  let x = anchor.left + anchor.width + GAP;
+  if (x + CARD_W > vp.w - M) x = anchor.left - CARD_W - GAP;
+  if (x < M) x = Math.min(Math.max(M, anchor.left), vp.w - CARD_W - M);
+  let y = anchor.top + anchor.height / 2 - h / 2;
   y = Math.max(M, Math.min(y, vp.h - h - M));
   return { x, y };
 }
 
-export default function PropertyInspector({ object, panel, anchorRect, viewport, onAction }) {
+function Slider({ c, value, onStart, onChange }) {
+  const v = Number.isFinite(value) ? value : c.min;
+  const disp = c.field === "opacity" ? `${Math.round(v)}${c.unit}` : `${c.step < 1 ? v.toFixed(2) : Math.round(v)}${c.unit}`;
+  return (
+    <div style={ctrlRow}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, opacity: 0.92 }}>
+        <span>{c.label}</span>
+        <span style={{ opacity: 0.6, fontVariantNumeric: "tabular-nums" }}>{disp}</span>
+      </div>
+      <input
+        type="range"
+        min={c.control.min}
+        max={c.control.max}
+        step={c.control.step}
+        value={v}
+        onPointerDown={onStart}
+        onChange={(e) => onChange({ [c.control.field]: Number(e.target.value) })}
+        style={{ width: "100%", accentColor: "#d8b36a", cursor: "pointer" }}
+      />
+    </div>
+  );
+}
+
+export default function PropertyInspector({ object, panel, values, anchorRect, viewport, onAction, onControlStart, onControlChange }) {
   const ref = useRef(null);
   const [shown, setShown] = useState(false);
   const [pos, setPos] = useState(null);
   const [note, setNote] = useState(null);
   const noteTimer = useRef(0);
 
-  // measure height → position; re-measure when content/anchor/viewport change
   useLayoutEffect(() => {
-    const h = ref.current ? ref.current.offsetHeight : 320;
+    const h = ref.current ? ref.current.offsetHeight : 360;
     setPos(place(anchorRect, viewport, h));
-  }, [anchorRect, viewport, panel]);
+  }, [anchorRect, viewport, panel, values]);
 
   useEffect(() => {
     const id = requestAnimationFrame(() => setShown(true));
     return () => cancelAnimationFrame(id);
   }, []);
-
   useEffect(() => () => clearTimeout(noteTimer.current), []);
 
-  const click = (a) => {
-    if (a.kind === "real") {
-      onAction(a.id);
-    } else {
-      setNote(`${a.label} — coming soon`);
-      clearTimeout(noteTimer.current);
-      noteTimer.current = setTimeout(() => setNote(null), 1800);
-    }
+  const soonNote = (label) => {
+    setNote(`${label} — coming soon`);
+    clearTimeout(noteTimer.current);
+    noteTimer.current = setTimeout(() => setNote(null), 1800);
   };
 
   const hidden = !pos;
@@ -95,6 +129,93 @@ export default function PropertyInspector({ object, panel, anchorRect, viewport,
     top: pos ? pos.y : 0,
     opacity: shown && !hidden ? 1 : 0,
     transform: shown && !hidden ? "translateX(0) scale(1)" : "translateX(6px) scale(0.98)",
+  };
+
+  const renderControl = (a) => {
+    const c = a.control;
+    if (c.type === "slider") {
+      return <Slider key={a.id} c={a} value={values[c.field]} onStart={onControlStart} onChange={onControlChange} />;
+    }
+    if (c.type === "fontFamily") {
+      return (
+        <div key={a.id} style={ctrlRow}>
+          <div style={ctrlHead}>
+            <span style={{ width: 16, textAlign: "center" }}>{a.icon}</span>
+            <span>Font</span>
+          </div>
+          <input
+            list="pi-fonts"
+            defaultValue={values.fontFamily || ""}
+            placeholder="Search fonts…"
+            onFocus={onControlStart}
+            onChange={(e) => e.target.value && onControlChange({ fontFamily: e.target.value })}
+            style={{
+              width: "100%", padding: "6px 8px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)",
+              background: "rgba(0,0,0,0.25)", color: "#f0ead9", font: "inherit", boxSizing: "border-box",
+            }}
+          />
+          <datalist id="pi-fonts">
+            {FONT_FAMILIES.map((f) => (
+              <option key={f} value={f} />
+            ))}
+          </datalist>
+        </div>
+      );
+    }
+    if (c.type === "weight") {
+      const cur = values.fontStyle === "normal" ? "normal" : "bold";
+      const opt = (w, label) => (
+        <button
+          key={w}
+          onClick={() => {
+            onControlStart();
+            onControlChange({ fontStyle: w });
+          }}
+          style={{
+            flex: 1, padding: "6px 0", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
+            background: cur === w ? "#d8b36a" : "rgba(255,255,255,0.05)",
+            color: cur === w ? "#1a1a1a" : "#f0ead9", cursor: "pointer", font: "inherit",
+            fontWeight: w === "bold" ? 700 : 400,
+          }}
+        >
+          {label}
+        </button>
+      );
+      return (
+        <div key={a.id} style={ctrlRow}>
+          <div style={ctrlHead}>
+            <span style={{ width: 16, textAlign: "center" }}>{a.icon}</span>
+            <span>Weight</span>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            {opt("normal", "Regular")}
+            {opt("bold", "Bold")}
+          </div>
+        </div>
+      );
+    }
+    if (c.type === "color") {
+      const hex = rgbToHex(values.fill);
+      return (
+        <div key={a.id} style={{ ...ctrlRow, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={ctrlHead}>
+            <span style={{ width: 16, textAlign: "center" }}>{a.icon}</span>
+            <span>Color</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ opacity: 0.6, fontVariantNumeric: "tabular-nums" }}>{hex}</span>
+            <input
+              type="color"
+              defaultValue={hex}
+              onPointerDown={onControlStart}
+              onInput={(e) => onControlChange({ fill: e.target.value })}
+              style={{ width: 30, height: 26, padding: 0, border: "none", background: "none", cursor: "pointer" }}
+            />
+          </div>
+        </div>
+      );
+    }
+    return null;
   };
 
   return (
@@ -108,14 +229,16 @@ export default function PropertyInspector({ object, panel, anchorRect, viewport,
       {panel.note && <div style={{ fontSize: 11, opacity: 0.6, margin: "2px 0 6px" }}>{panel.note}</div>}
 
       {panel.actions.map((a, i) => {
+        if (a.kind === "control") return renderControl(a);
+
         const prevReal = i > 0 ? panel.actions[i - 1].kind === "real" : a.kind === "real";
-        const divider = a.kind === "real" && !prevReal; // separate the universal real footer
+        const divider = a.kind === "real" && !prevReal;
         return (
           <React.Fragment key={a.id}>
             {divider && <div style={{ height: 1, background: "rgba(255,255,255,0.08)", margin: "8px 2px 2px" }} />}
             <button
-              style={row(a.danger)}
-              onClick={() => click(a)}
+              style={rowBtn(a.danger)}
+              onClick={() => (a.kind === "real" ? onAction(a.id) : soonNote(a.label))}
               onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.12)")}
               onMouseLeave={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}
             >
@@ -124,13 +247,8 @@ export default function PropertyInspector({ object, panel, anchorRect, viewport,
               {a.kind === "soon" && (
                 <span
                   style={{
-                    fontSize: 9,
-                    fontWeight: 700,
-                    letterSpacing: 0.4,
-                    padding: "2px 6px",
-                    borderRadius: 6,
-                    background: "rgba(216,179,106,0.18)",
-                    color: "#d8b36a",
+                    fontSize: 9, fontWeight: 700, letterSpacing: 0.4, padding: "2px 6px", borderRadius: 6,
+                    background: "rgba(216,179,106,0.18)", color: "#d8b36a",
                   }}
                 >
                   SOON
@@ -142,16 +260,7 @@ export default function PropertyInspector({ object, panel, anchorRect, viewport,
       })}
 
       {note && (
-        <div
-          style={{
-            marginTop: 8,
-            padding: "7px 10px",
-            borderRadius: 9,
-            background: "rgba(216,179,106,0.14)",
-            color: "#e6cf9c",
-            fontSize: 12,
-          }}
-        >
+        <div style={{ marginTop: 8, padding: "7px 10px", borderRadius: 9, background: "rgba(216,179,106,0.14)", color: "#e6cf9c", fontSize: 12 }}>
           {note}
         </div>
       )}
