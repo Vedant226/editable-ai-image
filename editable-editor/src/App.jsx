@@ -52,7 +52,7 @@ function decodeImage(url) {
    begins on the FIRST drag/transform via `onLiftStart`, never on selection.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, refText, styleOverride, onChange, onStartTextEdit, onLiftStart }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, refText, styleOverride, onChange, onStartTextEdit, onLiftStart, onSelect }) {
   // The resting highlight draws the ORIGINAL /layers PNG (closest to the base);
   // the refined /lift cutout (decoded element, passed in) is used only once
   // lifted. Because both are READY HTMLImageElements, swapping between them
@@ -108,6 +108,14 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
       : {};
 
   const liftStart = () => onLiftStart?.(shapeProps.id);
+  // dupes select themselves on click (cancelBubble so the Stage's canvas
+  // selection doesn't also fire); canonical objects keep selecting via the Stage.
+  const selectClick = onSelect
+    ? (e) => {
+        e.cancelBubble = true;
+        onSelect(shapeProps.id);
+      }
+    : undefined;
   const updatePosition = (e) => onChange({ ...shapeProps, x: e.target.x(), y: e.target.y() });
 
   const handleTransform = () => {
@@ -142,6 +150,8 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
           rotation={shapeProps.rotation || 0}
           opacity={(opacity ?? 1) * (isText ? 1 - tf : 1)}
           draggable={manipulable}
+          onClick={selectClick}
+          onTap={selectClick}
           onDblClick={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
           onDblTap={isText ? () => onStartTextEdit?.(shapeProps.id) : undefined}
           onDragStart={liftStart}
@@ -189,6 +199,8 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
           verticalAlign="middle"
           wrap="none"
           draggable={manipulable}
+          onClick={selectClick}
+          onTap={selectClick}
           onDblClick={() => onStartTextEdit?.(shapeProps.id)}
           onDblTap={() => onStartTextEdit?.(shapeProps.id)}
           onDragStart={liftStart}
@@ -314,6 +326,7 @@ export default function App() {
   const prevSelRef = useRef(null);
   const lastHoverRef = useRef(0);
   const editedAtRef = useRef(new Map()); // text id -> time of first edit (bitmap→text crossfade)
+  const dupCounterRef = useRef(0); // monotonic id source for duplicated instances
   const TEXT_FADE_MS = 260;
 
   // Editing Illusion Engine (stateful; created once)
@@ -548,7 +561,9 @@ export default function App() {
   );
 
   // ---- inline text editing ----
-  const startTextEdit = useCallback((id) => setEditingId(id), []);
+  // only canonical (OM-backed) objects have the inline editor + commit path; a
+  // duplicate has no OM object, so editing it would be a dead-end — no-op it.
+  const startTextEdit = useCallback((id) => { if (om?.getObject(id)) setEditingId(id); }, [om]);
   const cancelText = useCallback(() => setEditingId(null), []);
   const commitText = useCallback(
     (value) => {
@@ -573,6 +588,21 @@ export default function App() {
   const deleteSelected = useCallback(() => {
     const id = session.selectedId;
     if (id == null || !om) return;
+    // a duplicate has no footprint to repair — fade it out and drop the entry
+    if (!om.getObject(id) && session.entries[id]?.meta) {
+      eie.delete(id, performance.now());
+      kick();
+      setTimeout(
+        () =>
+          commit((s) => {
+            const entries = { ...s.entries };
+            delete entries[id];
+            return { ...s, entries, selectedId: s.selectedId === id ? null : s.selectedId };
+          }),
+        eie.config.deleteMs + 40
+      );
+      return;
+    }
     prefetchLift(id); // ensure a footprint fill exists so deletion never reveals a hole
     let tries = 0;
     const run = () => {
@@ -586,7 +616,7 @@ export default function App() {
       // else (no backend / fill unavailable): leave the object in place rather than expose a hole
     };
     run();
-  }, [session.selectedId, om, eie, kick, commit, prefetchLift]);
+  }, [session.selectedId, session.entries, om, eie, kick, commit, prefetchLift]);
 
   // z-order acts on a lifted object; a resting selection is activated first so
   // the button is never a dead affordance (re-ordering doesn't displace the
@@ -605,6 +635,37 @@ export default function App() {
   const bringToFront = useCallback(() => reorder("front"), [reorder]);
   const sendToBack = useCallback(() => reorder("back"), [reorder]);
 
+  // ---- duplicate: an additive COPY (its own synthetic session entry carrying
+  // `meta`, so it needs no /lift fill — it sits on top of the scene and reveals
+  // it when faded/moved). Reuses selection, drag, z-order, the inspector and the
+  // EIE; never touches the OM or the canonical selection path. ----
+  const selectDupe = useCallback((id) => update((s) => ({ ...s, selectedId: id })), [update]);
+  const duplicateSelected = useCallback(() => {
+    const id = session.selectedId;
+    if (id == null || !om) return;
+    const o = om.getObject(id);
+    const srcEntry = session.entries[id];
+    let meta, baseT;
+    if (o) {
+      meta = { category: o.category, role: o.role, file: o.file, bbox: { ...o.bbox }, style: o.style || null, text: srcEntry?.text ?? o.text };
+      baseT = srcEntry?.transform || { x: o.bbox.x, y: o.bbox.y, width: o.bbox.w, height: o.bbox.h, rotation: o.rotation };
+    } else if (srcEntry?.meta) {
+      meta = { ...srcEntry.meta }; // duplicate of a duplicate
+      baseT = srcEntry.transform;
+    } else return;
+    const dupId = `dup:${(dupCounterRef.current += 1)}`;
+    const t = { x: baseT.x + 24, y: baseT.y + 24, width: baseT.width, height: baseT.height, rotation: baseT.rotation || 0 };
+    commit((s) => {
+      const maxZ = Object.values(s.entries).reduce((m, e) => Math.max(m, e.z || 0), 0);
+      return {
+        ...s,
+        selectedId: dupId,
+        entries: { ...s.entries, [dupId]: { objectId: dupId, state: "active", deleted: false, z: maxZ + 1, transform: t, meta } },
+      };
+    });
+    kick();
+  }, [session.selectedId, session.entries, om, commit, kick]);
+
   // ---- property inspector: dispatch its REAL actions to existing handlers
   // (placeholder/AI actions are handled inside the panel itself) ----
   const handlePanelAction = useCallback(
@@ -615,8 +676,9 @@ export default function App() {
       else if (id === "front") bringToFront();
       else if (id === "back") sendToBack();
       else if (id === "delete") deleteSelected();
+      else if (id === "duplicate") duplicateSelected();
     },
-    [session.selectedId, startTextEdit, bringToFront, sendToBack, deleteSelected]
+    [session.selectedId, startTextEdit, bringToFront, sendToBack, deleteSelected, duplicateSelected]
   );
 
   // ---- live property controls (opacity / rotation / text style overrides) ----
@@ -630,7 +692,7 @@ export default function App() {
     (patch) => {
       const id = session.selectedId;
       if (id == null || !om) return;
-      prefetchLift(id);
+      if (om.getObject(id)) prefetchLift(id); // dupes need no fill
       update((s) => {
         const base = s.entries[id]?.state === "active" ? s : om.activate(s, id).session;
         if ("rotation" in patch) return om.applyTransform(base, id, { rotation: patch.rotation });
@@ -711,8 +773,14 @@ export default function App() {
 
   const scene = vr ? vr.resolveScene(session) : { activeVisuals: [] };
   const now = clockRef.current;
-  const selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
-  const selectedLifted = selected ? !!liftAssetsRef.current.get(selected.id)?.fill : false;
+  let selected = session.selectedId != null && om ? om.getObject(session.selectedId) : null;
+  // a selected DUPLICATE resolves from its session entry's carried metadata
+  const selDupEntry = !selected && session.selectedId != null ? session.entries[session.selectedId] : null;
+  const isDupeSel = !!selDupEntry?.meta;
+  if (isDupeSel) {
+    selected = { id: session.selectedId, ...selDupEntry.meta, rotation: selDupEntry.transform?.rotation ?? 0 };
+  }
+  const selectedLifted = selected ? (isDupeSel ? true : !!liftAssetsRef.current.get(selected.id)?.fill) : false;
 
   // Typography estimate for the SELECTED text → the inspector's default control
   // values (so Font/Size/Weight/Color start at the auto-matched values). Same
@@ -756,12 +824,31 @@ export default function App() {
   // its silhouette glow and be grabbed — drawn from its ORIGINAL pixels in place
   // (identical to the base), with no fill behind it (the base still owns those
   // pixels). It joins the lifted objects from the scene.
-  const renderList = [...scene.activeVisuals];
-  if (selected && vr) {
+  // duplicated instances — synthetic entries carrying `meta`; additive copies
+  // rendered through the same layer (no /lift fill needed)
+  const dupeVisuals = [];
+  for (const key in session.entries) {
+    const e = session.entries[key];
+    if (e.meta && e.state === "active" && !e.deleted) {
+      dupeVisuals.push({
+        objectId: key,
+        file: e.meta.file,
+        isText: e.meta.role === "text",
+        category: e.meta.category,
+        text: e.text ?? e.meta.text,
+        style: e.meta.style,
+        transform: e.transform,
+        z: e.z || 0,
+        isDupe: true,
+      });
+    }
+  }
+  const renderList = [...scene.activeVisuals, ...dupeVisuals].sort((a, b) => (a.z || 0) - (b.z || 0));
+  if (selected && vr && !isDupeSel) {
     const selEntry = session.entries[selected.id];
     if ((!selEntry || selEntry.state !== "active") && !selEntry?.deleted) {
       const sv = vr.resolve(selected.id, session);
-      if (sv) renderList.push(sv);
+      if (sv) renderList.push(sv); // resting-selected highlight on top
     }
   }
 
@@ -966,7 +1053,7 @@ export default function App() {
                 isEditing={editingId === v.objectId}
                 edited={editedFlag}
                 textFade={textFade}
-                manipulable={fillReady}
+                manipulable={v.isDupe ? true : fillReady}
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
                 opacity={opacity * userOpacity}
                 cutoutImg={!v.isText && isActive && a && a.cutout ? a.cutout.img : null}
@@ -975,6 +1062,7 @@ export default function App() {
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
                 onStartTextEdit={startTextEdit}
                 onLiftStart={liftStart}
+                onSelect={v.isDupe ? selectDupe : undefined}
               />
             );
           })}
