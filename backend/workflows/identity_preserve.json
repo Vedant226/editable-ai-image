@@ -1,0 +1,69 @@
+{
+  "_comment": "IP-Adapter FaceID (SDXL) identity-preservation workflow (ComfyUI API format). Used ONLY when the ComfyUI_IPAdapter_plus (FaceID) nodes + models are installed — identity_manager detects this and the engine falls back to insightface face-lock otherwise, so nothing here is ever hardcoded into Python or required to run. Reference face -> face detection + embedding (IPAdapterUnifiedLoaderFaceID/insightface) -> IPAdapterFaceID conditions the SDXL model -> the target image is used as the init latent (so hair/clothing/background/pose are kept) -> KSampler regenerates with the reference identity -> decode -> save. backend/comfy_identity.py injects values by node id (checkpoint, reference_image, target_image, ipadapter_faceid.weight). To switch to InstantID instead, drop in an InstantID graph here with the same node ids; the engine and manager need no changes.",
+  "checkpoint": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "sd_xl_base_1.0.safetensors" }
+  },
+  "faceid_loader": {
+    "class_type": "IPAdapterUnifiedLoaderFaceID",
+    "inputs": { "model": ["checkpoint", 0], "preset": "FACEID PLUS V2", "provider": "CPU" }
+  },
+  "reference_image": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "identity_reference.png" }
+  },
+  "target_image": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "identity_target.png" }
+  },
+  "ipadapter_faceid": {
+    "class_type": "IPAdapterFaceID",
+    "inputs": {
+      "model": ["faceid_loader", 0],
+      "ipadapter": ["faceid_loader", 1],
+      "image": ["reference_image", 0],
+      "weight": 0.85,
+      "weight_faceidv2": 1.0,
+      "weight_type": "linear",
+      "combine_embeds": "concat",
+      "start_at": 0.0,
+      "end_at": 1.0,
+      "embeds_scaling": "V only"
+    }
+  },
+  "positive_prompt": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "a person, same identity, photorealistic, sharp detail", "clip": ["checkpoint", 1] }
+  },
+  "negative_prompt": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "different person, deformed, blurry, lowres, distorted, artifacts, watermark, text", "clip": ["checkpoint", 1] }
+  },
+  "vae_encode": {
+    "class_type": "VAEEncode",
+    "inputs": { "pixels": ["target_image", 0], "vae": ["checkpoint", 2] }
+  },
+  "ksampler": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["ipadapter_faceid", 0],
+      "seed": 0,
+      "steps": 30,
+      "cfg": 7.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 0.55,
+      "positive": ["positive_prompt", 0],
+      "negative": ["negative_prompt", 0],
+      "latent_image": ["vae_encode", 0]
+    }
+  },
+  "vae_decode": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["ksampler", 0], "vae": ["checkpoint", 2] }
+  },
+  "save": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["vae_decode", 0], "filename_prefix": "identity_preserve" }
+  }
+}

@@ -7,7 +7,7 @@ import React, {
   useCallback,
 } from "react";
 
-import { Stage, Layer, Image, Transformer, Text } from "react-konva";
+import { Stage, Layer, Image, Transformer, Text, TextPath } from "react-konva";
 import useImage from "use-image";
 
 import { createObjectManager } from "./objectManager";
@@ -52,13 +52,16 @@ function decodeImage(url) {
    begins on the FIRST drag/transform via `onLiftStart`, never on selection.
 ========================== */
 
-function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, refText, styleOverride, onChange, onStartTextEdit, onLiftStart, onSelect }) {
+function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, manipulable, glow, opacity, cutoutImg, editImg, refText, styleOverride, onChange, onStartTextEdit, onLiftStart, onSelect }) {
   // The resting highlight draws the ORIGINAL /layers PNG (closest to the base);
   // the refined /lift cutout (decoded element, passed in) is used only once
   // lifted. Because both are READY HTMLImageElements, swapping between them
   // keeps the SAME Konva node mounted — a drag in progress is never orphaned.
   const [layerImage] = useImage(`/layers/${encodeURIComponent(shapeProps.file || "")}`);
-  const image = cutoutImg || layerImage;
+  // an integrated AI edit (an object-sized canvas) BECOMES the object's
+  // appearance — so it moves/scales/rotates with this node and truly replaces the
+  // original pixels (no separate overlay that can drift or survive underneath)
+  const image = editImg || cutoutImg || layerImage;
 
   const shapeRef = useRef(null); // the <Image> (bitmap / cutout)
   const textRef = useRef(null); // the synthesized <Text> (separate ref: unmounting the Image must not null it)
@@ -163,7 +166,7 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
       )}
 
       {/* once the user edits text, synthesize typography from the font estimation */}
-      {isText && edited && (
+      {isText && edited && !styleOverride?.curve && (
         <Text
           ref={textRef}
           visible={!isEditing}
@@ -179,8 +182,14 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
           fontSize={styleOverride?.fontSize || synthStyle?.fontSize || Math.max(14, shapeProps.height * 0.55)}
           letterSpacing={styleOverride?.letterSpacing ?? synthStyle?.letterSpacing ?? 0}
           lineHeight={styleOverride?.lineHeight ?? 1}
-          // a user colour override beats the sampled gold gradient; else gradient, else sampled solid
-          {...(styleOverride?.fill
+          // user gradient override > user colour override > sampled gradient > sampled solid
+          {...(styleOverride?.gradient
+            ? {
+                fillLinearGradientStartPoint: { x: 0, y: 0 },
+                fillLinearGradientEndPoint: { x: 0, y: shapeProps.height },
+                fillLinearGradientColorStops: styleOverride.gradient,
+              }
+            : styleOverride?.fill
             ? { fill: styleOverride.fill }
             : synthStyle?.gradient
             ? {
@@ -189,15 +198,58 @@ function EditableLayer({ shapeProps, isSelected, isEditing, edited, textFade, ma
                 fillLinearGradientColorStops: synthStyle.gradient,
               }
             : { fill: synthStyle?.fill || shapeProps.fontColor || "#d8b36a" })}
-          stroke={synthStyle?.stroke || shapeProps.strokeColor || "#5a2e12"}
-          strokeWidth={synthStyle?.strokeWidth ?? (shapeProps.strokeWidth || 1)}
-          shadowColor={synthStyle?.shadowColor}
-          shadowBlur={synthStyle?.shadowBlur}
-          shadowOpacity={synthStyle?.shadowOpacity}
-          shadowOffsetY={synthStyle?.shadowOffsetY}
-          align="center"
+          stroke={styleOverride?.stroke ?? synthStyle?.stroke ?? shapeProps.strokeColor ?? "#5a2e12"}
+          strokeWidth={styleOverride?.strokeWidth ?? synthStyle?.strokeWidth ?? (shapeProps.strokeWidth || 1)}
+          // user shadow (Shadow slider) overrides the sampled drop-shadow when set
+          shadowColor={styleOverride?.shadowBlur != null ? (styleOverride.shadowColor || "#000000") : synthStyle?.shadowColor}
+          shadowBlur={styleOverride?.shadowBlur ?? synthStyle?.shadowBlur}
+          shadowOpacity={styleOverride?.shadowBlur != null ? (styleOverride.shadowBlur > 0 ? 0.55 : 0) : synthStyle?.shadowOpacity}
+          shadowOffsetY={styleOverride?.shadowBlur != null ? 2 : synthStyle?.shadowOffsetY}
+          align={styleOverride?.align || "center"}
           verticalAlign="middle"
           wrap="none"
+          draggable={manipulable}
+          onClick={selectClick}
+          onTap={selectClick}
+          onDblClick={() => onStartTextEdit?.(shapeProps.id)}
+          onDblTap={() => onStartTextEdit?.(shapeProps.id)}
+          onDragStart={liftStart}
+          onDragEnd={updatePosition}
+          onTransformStart={liftStart}
+          onTransformEnd={handleTransform}
+          {...glowProps}
+        />
+      )}
+
+      {/* curved text: when the Curve slider is set, render along an arc path
+          (TextPath). Solid fill only (gradient falls back to fill). Unset (0) =
+          the plain <Text> above, so default behaviour is unchanged. */}
+      {isText && edited && !!styleOverride?.curve && (
+        <TextPath
+          ref={textRef}
+          visible={!isEditing}
+          text={shapeProps.text || "Edit me"}
+          x={shapeProps.x}
+          y={shapeProps.y}
+          rotation={shapeProps.rotation || 0}
+          opacity={(opacity ?? 1) * tf}
+          data={(() => {
+            const W = shapeProps.width, H = shapeProps.height;
+            const c = Math.max(-1, Math.min(1, (styleOverride.curve || 0) / 100));
+            const my = H / 2;
+            return `M 0 ${my} Q ${W / 2} ${my - c * H * 0.9} ${W} ${my}`;
+          })()}
+          align="center"
+          fontFamily={styleOverride?.fontFamily || synthStyle?.fontFamily || shapeProps.fontFamily || "Cinzel"}
+          fontStyle={styleOverride?.fontStyle || synthStyle?.fontStyle || "bold"}
+          fontSize={styleOverride?.fontSize || synthStyle?.fontSize || Math.max(14, shapeProps.height * 0.55)}
+          letterSpacing={styleOverride?.letterSpacing ?? synthStyle?.letterSpacing ?? 0}
+          fill={styleOverride?.fill || synthStyle?.fill || shapeProps.fontColor || "#d8b36a"}
+          stroke={styleOverride?.stroke ?? synthStyle?.stroke ?? shapeProps.strokeColor ?? "#5a2e12"}
+          strokeWidth={styleOverride?.strokeWidth ?? synthStyle?.strokeWidth ?? (shapeProps.strokeWidth || 1)}
+          shadowColor={styleOverride?.shadowBlur != null ? (styleOverride.shadowColor || "#000000") : synthStyle?.shadowColor}
+          shadowBlur={styleOverride?.shadowBlur ?? synthStyle?.shadowBlur}
+          shadowOpacity={styleOverride?.shadowBlur != null ? (styleOverride.shadowBlur > 0 ? 0.55 : 0) : synthStyle?.shadowOpacity}
           draggable={manipulable}
           onClick={selectClick}
           onTap={selectClick}
@@ -309,10 +361,73 @@ const btn = (enabled = true) => ({
   opacity: enabled ? 1 : 0.6,
 });
 
+// Professional preset menus for the face AI tools (Phase 12). Each preset is
+// [label, prompt, direction?]; the modal also exposes an intensity slider that
+// maps to edit strength (denoise) on the backend. Icons label the dialog.
+const FACE_PRESETS = {
+  smile: { title: "Smile", icon: "😀", presets: [
+    ["Subtle", "a subtle gentle closed-mouth smile"],
+    ["Natural", "a warm natural smile"],
+    ["Happy", "a happy smile showing teeth"],
+    ["Laughing", "a big joyful laughing open smile"],
+  ] },
+  beard: { title: "Beard", icon: "🧔", presets: [
+    ["Stubble", "light short stubble"],
+    ["Short", "a short neatly trimmed beard"],
+    ["Full", "a full thick beard"],
+    ["Goatee", "a goatee and moustache"],
+  ] },
+  glasses: { title: "Glasses", icon: "👓", presets: [
+    ["Round", "round metal eyeglasses"],
+    ["Square", "square framed eyeglasses"],
+    ["Rimless", "thin rimless eyeglasses"],
+    ["Sunglasses", "dark sunglasses"],
+  ] },
+  age: { title: "Age", icon: "⏳", presets: [
+    ["Younger", "a youthful younger version of the face", "younger"],
+    ["Adult", "an adult version of the face"],
+    ["Older", "an older aged face with natural wrinkles", "older"],
+  ] },
+  skin: { title: "Skin Tone", icon: "🎨", presets: [
+    ["Smooth", "smooth clear retouched skin"],
+    ["Fair", "fair light skin tone"],
+    ["Tan", "warm sun-tanned skin tone"],
+    ["Deep", "deep rich skin tone"],
+  ] },
+};
+
+// Quick-fill style presets for the Change Clothes / Change Hair prompt dialogs.
+const CLOTHES_PRESETS = [
+  ["Suit", "a tailored business suit"], ["Casual", "casual everyday clothes"],
+  ["Royal", "an ornate royal robe with gold trim"], ["Traditional", "traditional cultural attire"],
+  ["Formal", "elegant formal evening wear"], ["Fantasy", "ornate fantasy armor"],
+];
+const HAIR_PRESETS = [
+  ["Short", "short hair"], ["Long", "long flowing hair"], ["Curly", "curly hair"],
+  ["Straight", "long straight hair"], ["Ponytail", "hair tied in a ponytail"],
+  ["Buzz Cut", "a short buzz cut"], ["Bald", "bald head with no hair"],
+];
+const BG_GEN_PRESETS = [
+  ["Studio", "a clean professional studio backdrop, soft even lighting"],
+  ["Outdoor", "a natural outdoor landscape background, soft daylight, depth"],
+  ["Sky", "a bright blue sky with soft clouds"],
+  ["Gradient", "a smooth neutral gradient backdrop"],
+  ["Bokeh", "a softly blurred bokeh background, shallow depth of field"],
+];
+const presetChip = {
+  padding: "5px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.06)", color: "#f0ead9", cursor: "pointer",
+  font: "12px -apple-system, Segoe UI, system-ui, sans-serif",
+};
+
 export default function App() {
   const [rawMetadata, setRawMetadata] = useState(null);
   const [history, setHistory] = useState({ past: [], present: { entries: {}, selectedId: null }, future: [] });
   const session = history.present;
+  // latest session, readable from async callbacks without stale closures or
+  // re-creating those callbacks on every edit
+  const sessionRef = useRef(session);
+  sessionRef.current = session;
 
   const [viewport, setViewport] = useState({ w: window.innerWidth, h: window.innerHeight });
   const [liftEngine, setLiftEngine] = useState(null);
@@ -328,6 +443,157 @@ export default function App() {
   const editedAtRef = useRef(new Map()); // text id -> time of first edit (bitmap→text crossfade)
   const dupCounterRef = useRef(0); // monotonic id source for duplicated instances
   const TEXT_FADE_MS = 260;
+
+  // ---- Replace Object (AI) — overlay patches keyed by object id, plus the
+  // upload trigger + in-flight/error UI. Additive: never mutates locked state.
+  const replaceAssetsRef = useRef(new Map()); // id -> { img, x, y, w, h }  (face edits only — deferred)
+  // Integrated AI edits (the 7 object-level features): each edit composites its
+  // patch onto the object's CURRENT bitmap (original PNG, or a prior edit — they
+  // accumulate) into ONE object-sized bitmap, rendered THROUGH the object's
+  // EditableLayer at its live transform. The canvas lives here, versioned
+  // (`${id}:${editId}`) so undo/redo pick the right one; the session entry
+  // carries the `aiEdit` editId, so the edit is one undo step, moves/scales/
+  // rotates with the object, exports, and clears on delete. This REPLACES the old
+  // decoupled, statically-pinned top-most overlay that left the original beneath.
+  const editAssetsRef = useRef(new Map()); // `${id}:${editId}` -> HTMLCanvasElement
+  const editSeqRef = useRef(0);
+  const fileInputRef = useRef(null);
+  const pendingReplaceRef = useRef(null);
+  const [replacingId, setReplacingId] = useState(null);
+  const [replaceError, setReplaceError] = useState(null);
+
+  // ---- Background Replacement (AI) — full-canvas result + its own picker.
+  // Reuses the shared progress overlay + error toast; never touches the object-
+  // replace flow above. Additive only.
+  const bgFileInputRef = useRef(null);
+  const bgColorInputRef = useRef(null);            // native picker for Background → Color
+  const [bgBusy, setBgBusy] = useState(false);
+  const [bgResult, setBgResult] = useState(null); // { img } full-canvas image
+  const [bgGenModal, setBgGenModal] = useState(null); // Background → Generate prompt dialog
+  const [bgGenText, setBgGenText] = useState("");
+  const [lastEditInfo, setLastEditInfo] = useState(null); // transient "detected style · material · quality" readout
+
+  // Surface the planner's analysis + self-eval after an AI edit (transparency).
+  // No-op for responses without plan/quality, so it's safe to call everywhere.
+  const noteEdit = useCallback((p) => {
+    if (!p) return;
+    const plan = p.plan || {}, q = p.quality || {};
+    const parts = [];
+    if (plan.style) parts.push(String(plan.style).replace(/_/g, " "));
+    if (plan.material) parts.push(plan.material);
+    if (q.score != null) parts.push(`quality ${Math.round(q.score * 100)}%`);
+    if (!parts.length) return;
+    setLastEditInfo(parts.join(" · "));
+    setTimeout(() => setLastEditInfo(null), 6000);
+  }, []);
+
+  // ---- Remove Object (AI) — erases an object; the returned footprint patch is
+  // stored in the SAME overlay store as Replace Object (reuse) and rendered by
+  // the existing `replacements` pass. Reuses the shared progress/error UI too.
+  const [removingId, setRemovingId] = useState(null);
+
+  // ---- Recolor Object (AI) — color picker -> footprint patch (reuses overlay
+  // store + shared progress/error UI). colorInputRef opens the native picker.
+  const colorInputRef = useRef(null);
+  const pendingRecolorRef = useRef(null);
+  const [recoloringId, setRecoloringId] = useState(null);
+
+  // ---- Change Clothes (AI) — prompt dialog -> clothing-only patch. Reuses the
+  // overlay store + shared progress/error UI.
+  const [clothesModal, setClothesModal] = useState(null); // { id }
+  const [clothesText, setClothesText] = useState("");
+  const [clothesBusy, setClothesBusy] = useState(false);
+  const [aiIntensity, setAiIntensity] = useState(50); // shared edit strength for clothes/hair/person (50% == prior default)
+
+  // ---- Change Hair (AI) — prompt dialog -> hair-only patch. Reuses the overlay
+  // store + shared progress/error UI.
+  const [hairModal, setHairModal] = useState(null); // { id }
+  const [hairText, setHairText] = useState("");
+  const [hairBusy, setHairBusy] = useState(false);
+
+  // ---- Person Replace (AI) — dual-option dialog (upload image OR describe a
+  // person) -> footprint patch. Reuses the overlay store + shared progress/error.
+  const [personModal, setPersonModal] = useState(null); // { id }
+  const [personText, setPersonText] = useState("");
+  const [personBusy, setPersonBusy] = useState(false);
+  const personFileInputRef = useRef(null);
+  const pendingPersonRef = useRef(null);
+
+  // ---- Identity Preservation (AI) — one optional toggle, OFF by default. When
+  // ON, Hair / Clothes / Person Replace additionally call /comfyui/identity to
+  // impose the reference identity (no behavior change when OFF). Additive only.
+  const [preserveIdentity, setPreserveIdentity] = useState(true); // smart default: keep identity for face/hair/clothes/person
+
+  // Crop a region of the original base image to a PNG data URL (the identity
+  // reference for "preserve the original person").
+  const cropRegion = useCallback((x, y, w, h) => {
+    if (!backgroundImage) return null;
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    c.getContext("2d").drawImage(backgroundImage, x, y, w, h, 0, 0, w, h);
+    return c.toDataURL("image/png");
+  }, [backgroundImage]);
+
+  // Run the identity engine over a feature patch; on any failure return the patch
+  // unchanged so enabling identity never breaks a result.
+  const applyIdentity = useCallback(async (patch, referenceDataUrl) => {
+    if (!referenceDataUrl) return patch;
+    try {
+      const res = await fetch("/comfyui/identity", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ referenceImage: referenceDataUrl, targetImage: patch.png, strength: 0.9 }),
+      });
+      if (!res.ok) return patch;
+      const j = await res.json();
+      return j && j.png ? { ...patch, png: j.png } : patch;
+    } catch {
+      return patch;
+    }
+  }, []);
+
+  // ---- Object Manager + Visual Resolver ----
+  const om = useMemo(() => (rawMetadata ? createObjectManager(rawMetadata) : null), [rawMetadata]);
+  // live OM, readable from callbacks that may have been created before metadata
+  // loaded (om starts null). composeEdit is reached THROUGH handlers that don't
+  // list it as a dep, so without this it could close over a stale null om.
+  const omRef = useRef(om);
+  omRef.current = om;
+  const vr = useMemo(() => (om ? createVisualResolver(om) : null), [om]);
+  const isOpaqueAt = useAlphaHitTester(om);
+
+  // ---- single coordinate space ----
+  const imageSize = om ? om.getImageSize() : FALLBACK_IMAGE_SIZE;
+  const scale = Math.min(viewport.w / imageSize.width, viewport.h / imageSize.height);
+  const stageWidth = imageSize.width * scale;
+  const stageHeight = imageSize.height * scale;
+
+  // ---- Lighting & Shadow Harmonization (AI) — one optional toggle, OFF by
+  // default. When ON, Replace / Hair / Clothes / Background / Person pass their
+  // patch through /comfyui/lighting (a fast CPU post-process). On any failure it
+  // returns the patch unchanged, so it never blocks editing. Additive only.
+  const [autoLighting, setAutoLighting] = useState(true); // smart default: harmonize lighting in-engine
+
+  const applyLighting = useCallback(async (patch, fullImage = false) => {
+    try {
+      const m = fullImage ? 0 : Math.round(Math.min(96, 0.4 * Math.max(patch.w, patch.h)));
+      const rx = Math.max(0, patch.x - m), ry = Math.max(0, patch.y - m);
+      const rx2 = Math.min(imageSize.width, patch.x + patch.w + m);
+      const ry2 = Math.min(imageSize.height, patch.y + patch.h + m);
+      const reference = cropRegion(rx, ry, rx2 - rx, ry2 - ry);
+      if (!reference) return patch;
+      const res = await fetch("/comfyui/lighting", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ patch: patch.png, reference, patchLeft: patch.x - rx, patchTop: patch.y - ry }),
+      });
+      if (!res.ok) return patch;
+      const j = await res.json();
+      return j && j.png ? { ...patch, png: j.png } : patch;
+    } catch {
+      return patch;
+    }
+  }, [cropRegion, imageSize]);
 
   // Editing Illusion Engine (stateful; created once)
   const eieRef = useRef(null);
@@ -356,11 +622,6 @@ export default function App() {
     };
     requestAnimationFrame(step);
   }, [eie]);
-
-  // ---- Object Manager + Visual Resolver ----
-  const om = useMemo(() => (rawMetadata ? createObjectManager(rawMetadata) : null), [rawMetadata]);
-  const vr = useMemo(() => (om ? createVisualResolver(om) : null), [om]);
-  const isOpaqueAt = useAlphaHitTester(om);
 
   useEffect(() => {
     fetch("/layers/metadata.json")
@@ -392,12 +653,6 @@ export default function App() {
       cancelled = true;
     };
   }, []);
-
-  // ---- single coordinate space ----
-  const imageSize = om ? om.getImageSize() : FALLBACK_IMAGE_SIZE;
-  const scale = Math.min(viewport.w / imageSize.width, viewport.h / imageSize.height);
-  const stageWidth = imageSize.width * scale;
-  const stageHeight = imageSize.height * scale;
 
   // ---- history helpers ----
   const commit = useCallback((updater) => {
@@ -448,7 +703,7 @@ export default function App() {
           body: JSON.stringify({ objectId: id }),
         });
         if (!res.ok) throw new Error(`lift ${res.status}`);
-        const p = await res.json();
+        const p = await res.json(); noteEdit(p);
         // DECODE the bitmaps before exposing the object as ready. fillReady (and
         // hence draggable/transformable + the synth-text swap) must mean "can be
         // PAINTED this frame", not merely "URL known" — otherwise the footprint
@@ -484,6 +739,54 @@ export default function App() {
       }
     },
     [eie, kick]
+  );
+
+  // ---- integrate an AI edit INTO the object (the 7 object-level features) ----
+  // Composite the returned patch onto the object's current bitmap → ONE object-
+  // sized bitmap that BECOMES the object's appearance (rendered through its
+  // EditableLayer at the live transform). The object is activated so its lift
+  // fill hides the original baked-in pixels, and the edit is recorded on the
+  // session entry (`aiEdit` = versioned canvas id) so it is a single undo step
+  // and clears on delete. The original is truly replaced — never an overlay
+  // stacked on top of surviving pixels.
+  const composeEdit = useCallback(
+    async (id, patchImg, patch) => {
+      const om = omRef.current; // always the live OM (never a stale-null closure)
+      if (id == null || !om || !patchImg) return false;
+      const o = om.getObject(id);
+      if (!o) return false; // duplicates / non-OM ids: no integrated edit
+      const bbox = o.bbox; // {x,y,w,h} native object box
+      const w = Math.max(1, Math.round(bbox.w));
+      const h = Math.max(1, Math.round(bbox.h));
+      // Base = the object's CURRENT edited bitmap (so edits accumulate, e.g.
+      // recolor then change-clothes) or, first time, its original layer PNG.
+      const prevId = sessionRef.current.entries[id]?.aiEdit;
+      let baseImg = prevId != null ? editAssetsRef.current.get(`${id}:${prevId}`) : null;
+      if (!baseImg) baseImg = await decodeImage(`/layers/${encodeURIComponent(o.file || "")}`);
+      const c = document.createElement("canvas");
+      c.width = w;
+      c.height = h;
+      const ctx = c.getContext("2d");
+      if (baseImg) ctx.drawImage(baseImg, 0, 0, w, h);
+      // place the patch at its sub-position within the object box (full-footprint
+      // patches fill it; sub-region patches — clothes/hair — only their region)
+      const px = (patch.x ?? bbox.x) - bbox.x;
+      const py = (patch.y ?? bbox.y) - bbox.y;
+      ctx.drawImage(patchImg, px, py, patch.w ?? w, patch.h ?? h);
+      const editId = (editSeqRef.current += 1);
+      editAssetsRef.current.set(`${id}:${editId}`, c);
+      // warm the footprint fill so a later drag never reveals a hole, then record
+      // the edit (activate so the fill is in place + the edit actually renders)
+      prefetchLift(id);
+      commit((s) => {
+        const base = s.entries[id]?.state === "active" ? s : om.activate(s, id).session;
+        const e = base.entries[id];
+        return { ...base, entries: { ...base.entries, [id]: { ...e, aiEdit: editId } } };
+      });
+      kick();
+      return true;
+    },
+    [commit, prefetchLift, kick]
   );
 
   // ---- selection (NEVER lifts; selection must not modify pixels) ----
@@ -655,30 +958,529 @@ export default function App() {
     } else return;
     const dupId = `dup:${(dupCounterRef.current += 1)}`;
     const t = { x: baseT.x + 24, y: baseT.y + 24, width: baseT.width, height: baseT.height, rotation: baseT.rotation || 0 };
+    // carry any integrated AI edit onto the copy: point a dupe-keyed canvas at the
+    // SAME bitmap so the duplicate looks like the edited object, not the original.
+    const aiEdit = srcEntry?.aiEdit;
+    if (aiEdit != null) {
+      const canv = editAssetsRef.current.get(`${id}:${aiEdit}`);
+      if (canv) editAssetsRef.current.set(`${dupId}:${aiEdit}`, canv);
+    }
     commit((s) => {
       const maxZ = Object.values(s.entries).reduce((m, e) => Math.max(m, e.z || 0), 0);
       return {
         ...s,
         selectedId: dupId,
-        entries: { ...s.entries, [dupId]: { objectId: dupId, state: "active", deleted: false, z: maxZ + 1, transform: t, meta } },
+        entries: { ...s.entries, [dupId]: { objectId: dupId, state: "active", deleted: false, z: maxZ + 1, transform: t, meta, aiEdit } },
       };
     });
     kick();
   }, [session.selectedId, session.entries, om, commit, kick]);
+
+  // ---- Replace Object (AI): open a file picker for the selected object, then
+  // POST the upload to the ComfyUI bridge and INTEGRATE the returned patch into
+  // that object (composeEdit) so it becomes the object's own bitmap. The rest of
+  // the canvas is never touched. ----
+  const startReplace = useCallback((id) => {
+    if (id == null) return;
+    pendingReplaceRef.current = id;
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ""; // allow re-picking the same file
+      fileInputRef.current.click();
+    }
+  }, []);
+
+  const onReplaceFile = useCallback(
+    async (e) => {
+      const file = e.target.files && e.target.files[0];
+      const id = pendingReplaceRef.current;
+      pendingReplaceRef.current = null;
+      if (!file || id == null) return;
+      const dataUrl = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = rej;
+        fr.readAsDataURL(file);
+      });
+      setReplaceError(null);
+      setReplacingId(id);
+      try {
+        const res = await fetch("/comfyui/replace", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objectId: id, replacement: dataUrl, harmonize: autoLighting, evaluator: true }),
+        });
+        if (!res.ok) {
+          let msg = `replace failed (${res.status})`;
+          try {
+            const j = await res.json();
+            msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          } catch {}
+          throw new Error(msg);
+        }
+        const p = await res.json(); noteEdit(p);
+        const patch = (autoLighting && !p.harmonized) ? await applyLighting(p) : p;
+        const img = await decodeImage(patch.png);
+        if (!img) throw new Error("could not decode the replacement image");
+        await composeEdit(id, img, patch); // the edit BECOMES the object (no overlay)
+      } catch (err) {
+        console.error("replace failed", err);
+        setReplaceError(String(err.message || err));
+        setTimeout(() => setReplaceError(null), 6000);
+      } finally {
+        setReplacingId(null);
+      }
+    },
+    [kick, autoLighting, applyLighting]
+  );
+
+  // ---- Background Replacement (AI): upload a new backdrop; the bridge keeps
+  // every foreground object and regenerates only the background. The full-canvas
+  // result is drawn as the new base. Reuses the shared progress/error UI. ----
+  const startBackgroundReplace = useCallback(() => {
+    if (bgFileInputRef.current) {
+      bgFileInputRef.current.value = "";
+      bgFileInputRef.current.click();
+    }
+  }, []);
+
+  // Shared submit for every background mode (replace/generate/blur/color/remove).
+  // The full-canvas result is drawn as the new base. CPU modes (engine "cpu") and
+  // already-harmonized SDXL results skip the extra lighting pass.
+  const submitBackground = useCallback(
+    async (body) => {
+      setReplaceError(null);
+      setBgBusy(true);
+      try {
+        const res = await fetch("/comfyui/background", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!res.ok) {
+          let msg = `background failed (${res.status})`;
+          try {
+            const j = await res.json();
+            msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          } catch {}
+          throw new Error(msg);
+        }
+        const p = await res.json(); noteEdit(p);
+        const lit = (autoLighting && !p.harmonized && p.engine !== "cpu")
+          ? await applyLighting({ x: 0, y: 0, w: imageSize.width, h: imageSize.height, png: p.png }, true)
+          : { png: p.png };
+        const img = await decodeImage(lit.png);
+        if (!img) throw new Error("could not decode the background image");
+        setBgResult({ img });
+        kick();
+      } catch (err) {
+        console.error("background failed", err);
+        setReplaceError(String(err.message || err));
+        setTimeout(() => setReplaceError(null), 6000);
+      } finally {
+        setBgBusy(false);
+      }
+    },
+    [kick, autoLighting, applyLighting, imageSize]
+  );
+
+  const onBackgroundFile = useCallback(
+    async (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const dataUrl = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = rej;
+        fr.readAsDataURL(file);
+      });
+      submitBackground({ replacement: dataUrl });
+    },
+    [submitBackground]
+  );
+
+  // Background mode shortcuts: blur/remove are one-click, color opens a picker,
+  // generate opens a prompt dialog (studio/outdoor presets).
+  const blurBackground = useCallback(() => submitBackground({ mode: "blur", blur: 0.6 }), [submitBackground]);
+  const removeBackground = useCallback(() => submitBackground({ mode: "remove" }), [submitBackground]);
+  const colorBackground = useCallback(() => { if (bgColorInputRef.current) bgColorInputRef.current.click(); }, []);
+  const onBgColor = useCallback((e) => submitBackground({ mode: "color", targetColor: e.target.value }), [submitBackground]);
+  const generateBackground = useCallback(() => { setBgGenText(""); setBgGenModal(true); }, []);
+  const submitBgGenerate = useCallback(() => {
+    const prompt = bgGenText.trim();
+    setBgGenModal(null);
+    submitBackground(prompt ? { mode: "generate", prompt } : { mode: "generate" });
+  }, [bgGenText, submitBackground]);
+
+  // ---- Remove Object (AI): erase the selected object and drop the generated
+  // background fill onto its footprint (no upload). Reuses the overlay store and
+  // the shared progress/error UI. ----
+  const startRemove = useCallback(
+    async (id) => {
+      if (id == null) return;
+      setReplaceError(null);
+      setRemovingId(id);
+      try {
+        const res = await fetch("/comfyui/remove", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objectId: id }),
+        });
+        if (!res.ok) {
+          let msg = `remove failed (${res.status})`;
+          try {
+            const j = await res.json();
+            msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          } catch {}
+          throw new Error(msg);
+        }
+        const p = await res.json(); noteEdit(p);
+        const img = await decodeImage(p.png);
+        if (!img) throw new Error("could not decode the removal fill");
+        await composeEdit(id, img, p); // the erase BECOMES the object (no overlay)
+      } catch (err) {
+        console.error("remove failed", err);
+        setReplaceError(String(err.message || err));
+        setTimeout(() => setReplaceError(null), 6000);
+      } finally {
+        setRemovingId(null);
+      }
+    },
+    [kick]
+  );
+
+  // ---- Logo finishes (AI): metallic/glass (SDXL) + emboss/transparent (CPU).
+  // Footprint patch dropped into the shared overlay, like Remove/Recolor. ----
+  const [logoBusy, setLogoBusy] = useState(false);
+  const startLogoEffect = useCallback(
+    async (feature, id) => {
+      if (id == null) return;
+      setReplaceError(null);
+      setLogoBusy(true);
+      try {
+        const res = await fetch("/comfyui/logo", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objectId: id, feature }),
+        });
+        if (!res.ok) {
+          let msg = `logo ${feature} failed (${res.status})`;
+          try {
+            const j = await res.json();
+            msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          } catch {}
+          throw new Error(msg);
+        }
+        const p = await res.json(); noteEdit(p);
+        const img = await decodeImage(p.png);
+        if (!img) throw new Error("could not decode the logo effect");
+        await composeEdit(id, img, p); // the effect BECOMES the object (no overlay)
+      } catch (err) {
+        console.error("logo effect failed", err);
+        setReplaceError(String(err.message || err));
+        setTimeout(() => setReplaceError(null), 6000);
+      } finally {
+        setLogoBusy(false);
+      }
+    },
+    [kick]
+  );
+
+  // ---- Recolor Object (AI): open the color picker for the selected object;
+  // on a chosen color, recolor it (texture/lighting preserved) and drop the
+  // patch on its footprint. Reuses the overlay store + shared progress/error. ----
+  const startRecolor = useCallback((id) => {
+    if (id == null || !colorInputRef.current) return;
+    pendingRecolorRef.current = id;
+    colorInputRef.current.click(); // opens the native color picker
+  }, []);
+
+  const onRecolorColor = useCallback(
+    async (e) => {
+      const hex = e.target.value;
+      const id = pendingRecolorRef.current;
+      pendingRecolorRef.current = null;
+      if (!hex || id == null) return;
+      setReplaceError(null);
+      setRecoloringId(id);
+      try {
+        const res = await fetch("/comfyui/recolor", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objectId: id, targetColor: hex }),
+        });
+        if (!res.ok) {
+          let msg = `recolor failed (${res.status})`;
+          try {
+            const j = await res.json();
+            msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          } catch {}
+          throw new Error(msg);
+        }
+        const p = await res.json(); noteEdit(p);
+        const img = await decodeImage(p.png);
+        if (!img) throw new Error("could not decode the recolored object");
+        await composeEdit(id, img, p); // the recolour BECOMES the object (no overlay)
+      } catch (err) {
+        console.error("recolor failed", err);
+        setReplaceError(String(err.message || err));
+        setTimeout(() => setReplaceError(null), 6000);
+      } finally {
+        setRecoloringId(null);
+      }
+    },
+    [kick]
+  );
+
+  // ---- Change Clothes (AI): open a prompt dialog for the selected person; on
+  // Generate, regenerate only the clothing region and drop the patch onto it.
+  // Reuses the overlay store + shared progress/error UI. ----
+  const startChangeClothes = useCallback((id) => {
+    if (id == null) return;
+    setClothesText("");
+    setClothesModal({ id });
+  }, []);
+
+  const submitClothes = useCallback(async () => {
+    const id = clothesModal?.id;
+    const prompt = clothesText.trim();
+    if (id == null || !prompt) return;
+    setClothesModal(null);
+    setReplaceError(null);
+    setClothesBusy(true);
+    try {
+      const res = await fetch("/comfyui/clothes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ objectId: id, prompt, intensity: aiIntensity / 100, harmonize: autoLighting, evaluator: true }),
+      });
+      if (!res.ok) {
+        let msg = `change clothes failed (${res.status})`;
+        try {
+          const j = await res.json();
+          msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+        } catch {}
+        throw new Error(msg);
+      }
+      const p = await res.json(); noteEdit(p);
+      let patch = preserveIdentity ? await applyIdentity(p, cropRegion(p.x, p.y, p.w, p.h)) : p;
+      if (autoLighting && !p.harmonized) patch = await applyLighting(patch);
+      const img = await decodeImage(patch.png);
+      if (!img) throw new Error("could not decode the new clothing");
+      await composeEdit(id, img, patch); // new clothes composited onto the person (no overlay)
+    } catch (err) {
+      console.error("change clothes failed", err);
+      setReplaceError(String(err.message || err));
+      setTimeout(() => setReplaceError(null), 6000);
+    } finally {
+      setClothesBusy(false);
+    }
+  }, [clothesModal, clothesText, aiIntensity, kick, preserveIdentity, applyIdentity, cropRegion, autoLighting, applyLighting]);
+
+  // ---- Change Hair (AI): open a prompt dialog for the selected person; on
+  // Generate, regenerate only the hair region and drop the patch onto it.
+  // Reuses the overlay store + shared progress/error UI. ----
+  const startChangeHair = useCallback((id) => {
+    if (id == null) return;
+    setHairText("");
+    setHairModal({ id });
+  }, []);
+
+  const submitHair = useCallback(async () => {
+    const id = hairModal?.id;
+    const prompt = hairText.trim();
+    if (id == null || !prompt) return;
+    setHairModal(null);
+    setReplaceError(null);
+    setHairBusy(true);
+    try {
+      const res = await fetch("/comfyui/hair", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ objectId: id, prompt, intensity: aiIntensity / 100, harmonize: autoLighting, evaluator: true }),
+      });
+      if (!res.ok) {
+        let msg = `change hair failed (${res.status})`;
+        try {
+          const j = await res.json();
+          msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+        } catch {}
+        throw new Error(msg);
+      }
+      const p = await res.json(); noteEdit(p);
+      let patch = preserveIdentity ? await applyIdentity(p, cropRegion(p.x, p.y, p.w, p.h)) : p;
+      if (autoLighting && !p.harmonized) patch = await applyLighting(patch);
+      const img = await decodeImage(patch.png);
+      if (!img) throw new Error("could not decode the new hair");
+      await composeEdit(id, img, patch); // new hair composited onto the person (no overlay)
+    } catch (err) {
+      console.error("change hair failed", err);
+      setReplaceError(String(err.message || err));
+      setTimeout(() => setReplaceError(null), 6000);
+    } finally {
+      setHairBusy(false);
+    }
+  }, [hairModal, hairText, aiIntensity, kick, preserveIdentity, applyIdentity, cropRegion, autoLighting, applyLighting]);
+
+  // ---- Person Replace (AI): open a dialog offering "upload image" or "describe
+  // a person"; either path replaces the whole person within its footprint.
+  // Reuses the overlay store + shared progress/error UI. ----
+  const startReplacePerson = useCallback((id) => {
+    if (id == null) return;
+    setPersonText("");
+    setPersonModal({ id });
+  }, []);
+
+  const runPerson = useCallback(
+    async (body) => {
+      setPersonModal(null);
+      setReplaceError(null);
+      setPersonBusy(true);
+      try {
+        const res = await fetch("/comfyui/person", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...body, harmonize: autoLighting, evaluator: true }),
+        });
+        if (!res.ok) {
+          let msg = `person replace failed (${res.status})`;
+          try {
+            const j = await res.json();
+            msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          } catch {}
+          throw new Error(msg);
+        }
+        const p = await res.json(); noteEdit(p);
+        const ref = body.image || cropRegion(p.x, p.y, p.w, p.h);
+        let patch = preserveIdentity ? await applyIdentity(p, ref) : p;
+        if (autoLighting && !p.harmonized) patch = await applyLighting(patch);
+        const img = await decodeImage(patch.png);
+        if (!img) throw new Error("could not decode the replacement person");
+        await composeEdit(body.objectId, img, patch); // the new person BECOMES the object (no overlay)
+      } catch (err) {
+        console.error("person replace failed", err);
+        setReplaceError(String(err.message || err));
+        setTimeout(() => setReplaceError(null), 6000);
+      } finally {
+        setPersonBusy(false);
+      }
+    },
+    [kick, preserveIdentity, applyIdentity, cropRegion, autoLighting, applyLighting]
+  );
+
+  const submitPersonPrompt = useCallback(() => {
+    const id = personModal?.id;
+    const prompt = personText.trim();
+    if (id == null || !prompt) return;
+    runPerson({ objectId: id, prompt });
+  }, [personModal, personText, runPerson]);
+
+  const startPersonUpload = useCallback(() => {
+    if (personModal?.id == null || !personFileInputRef.current) return;
+    pendingPersonRef.current = personModal.id;
+    personFileInputRef.current.value = "";
+    personFileInputRef.current.click();
+  }, [personModal]);
+
+  const onPersonFile = useCallback(
+    async (e) => {
+      const file = e.target.files && e.target.files[0];
+      const id = pendingPersonRef.current;
+      pendingPersonRef.current = null;
+      if (!file || id == null) return;
+      const dataUrl = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result);
+        fr.onerror = rej;
+        fr.readAsDataURL(file);
+      });
+      runPerson({ objectId: id, image: dataUrl });
+    },
+    [runPerson]
+  );
+
+  // ---- Face edits (Beard / Smile / Age / Glasses / Skin) — one-click, via the
+  // shared engine. Like Remove/Recolor: no modal; the returned patch is stored in
+  // the overlay store keyed by feature (so several face edits coexist) and reuses
+  // the shared progress overlay + error toast + the lighting/identity hooks. ----
+  const [faceBusy, setFaceBusy] = useState(false);
+  const [faceModal, setFaceModal] = useState(null);   // { feature, id } — preset+intensity tool
+  const [faceIntensity, setFaceIntensity] = useState(50);
+  const startFaceEdit = useCallback(
+    async (feature, id, opts = {}) => {
+      if (id == null) return;
+      setReplaceError(null);
+      setFaceBusy(true);
+      try {
+        const res = await fetch("/comfyui/face", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ objectId: id, feature, ...opts, harmonize: autoLighting, evaluator: true }),
+        });
+        if (!res.ok) {
+          let msg = `face edit failed (${res.status})`;
+          try {
+            const j = await res.json();
+            msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          } catch {}
+          throw new Error(msg);
+        }
+        const p = await res.json(); noteEdit(p);
+        let patch = preserveIdentity ? await applyIdentity(p, cropRegion(p.x, p.y, p.w, p.h)) : p;
+        if (autoLighting && !p.harmonized) patch = await applyLighting(patch);
+        const img = await decodeImage(patch.png);
+        if (!img) throw new Error("could not decode the face edit");
+        replaceAssetsRef.current.set(`face_${feature}:${p.faceId ?? id}`, { img, x: patch.x, y: patch.y, w: patch.w, h: patch.h });
+        kick();
+      } catch (err) {
+        console.error("face edit failed", err);
+        setReplaceError(String(err.message || err));
+        setTimeout(() => setReplaceError(null), 6000);
+      } finally {
+        setFaceBusy(false);
+      }
+    },
+    [preserveIdentity, applyIdentity, cropRegion, autoLighting, applyLighting, kick]
+  );
 
   // ---- property inspector: dispatch its REAL actions to existing handlers
   // (placeholder/AI actions are handled inside the panel itself) ----
   const handlePanelAction = useCallback(
     (id) => {
       const sel = session.selectedId;
+      if (id === "replaceBg") return startBackgroundReplace(); // background needs no selection
+      if (id === "blurBg") return blurBackground();
+      if (id === "colorBg") return colorBackground();
+      if (id === "generateBg") return generateBackground();
+      if (id === "removeBg") return removeBackground();
       if (sel == null) return;
       if (id === "replaceText") startTextEdit(sel);
       else if (id === "front") bringToFront();
       else if (id === "back") sendToBack();
       else if (id === "delete") deleteSelected();
       else if (id === "duplicate") duplicateSelected();
+      else if (id === "replace") startReplace(sel);
+      else if (id === "remove") startRemove(sel);
+      else if (id === "recolor") startRecolor(sel);
+      else if (id === "clothes") startChangeClothes(sel);
+      else if (id === "hair") startChangeHair(sel);
+      else if (id === "replacePerson") startReplacePerson(sel);
+      // Face panel features → open the preset + intensity tool (shared face engine).
+      else if (["smile", "expression", "beard", "glasses", "skinTone", "faceAge", "age"].includes(id)) {
+        const feature = id === "skinTone" ? "skin" : (id === "faceAge" || id === "age") ? "age" : id === "expression" ? "smile" : id;
+        setFaceIntensity(50);
+        setFaceModal({ feature, id: sel });
+      }
+      // "Hair" in the face panel edits the hair of the face's person (prompt modal).
+      else if (id === "faceHair") { const par = om?.getParent?.(sel); startChangeHair(par ? par.id : sel); }
+      // Logo panel reuses the object Replace (upload) + Recolor flows.
+      else if (id === "replaceLogo" || id === "uploadLogo") startReplace(sel);
+      else if (id === "logoColor") startRecolor(sel);
+      else if (id === "logoMetallic") startLogoEffect("metallic", sel);
+      else if (id === "logoGlass") startLogoEffect("glass", sel);
+      else if (id === "logoEmboss") startLogoEffect("emboss", sel);
+      else if (id === "logoTransparent") startLogoEffect("transparent", sel);
     },
-    [session.selectedId, startTextEdit, bringToFront, sendToBack, deleteSelected, duplicateSelected]
+    [session.selectedId, startTextEdit, bringToFront, sendToBack, deleteSelected, duplicateSelected, startReplace, startBackgroundReplace, blurBackground, colorBackground, generateBackground, removeBackground, startRemove, startRecolor, startChangeClothes, startChangeHair, startReplacePerson, startFaceEdit, startLogoEffect, om]
   );
 
   // ---- live property controls (opacity / rotation / text style overrides) ----
@@ -815,6 +1617,12 @@ export default function App() {
         fill: ov.fill ?? selSynth?.fill ?? selected.style?.fontColor ?? "#d8b36a",
         letterSpacing: Math.round(ov.letterSpacing ?? selSynth?.letterSpacing ?? 0),
         lineHeight: ov.lineHeight ?? 1,
+        // text style extras (Outline / Shadow / Alignment / Gradient)
+        stroke: ov.stroke ?? selSynth?.stroke ?? selected.style?.strokeColor ?? "#5a2e12",
+        strokeWidth: ov.strokeWidth ?? selSynth?.strokeWidth ?? 1,
+        shadowBlur: ov.shadowBlur ?? 0,
+        align: ov.align ?? "center",
+        gradient: ov.gradient ?? null,
         opacity: Math.round((selEntry?.opacity ?? 1) * 100),
         rotation: Math.round(selEntry?.transform?.rotation ?? selected.rotation ?? 0),
       }
@@ -891,6 +1699,14 @@ export default function App() {
     }
   }
 
+  // AI face patches — the ONLY remaining top-most overlay (face sub-region edits
+  // are the deferred follow-up). Every object-level edit now renders THROUGH its
+  // object's EditableLayer (integrated, moves with the object), so it is NOT here.
+  const replacements = [];
+  for (const [id, r] of replaceAssetsRef.current) {
+    if (r && r.img && String(id).startsWith("face_")) replacements.push({ id, ...r });
+  }
+
   // inline editor screen rect
   let editor = null;
   if (editingId != null && om && stageRef.current) {
@@ -942,6 +1758,427 @@ export default function App() {
         justifyContent: "center",
       }}
     >
+      {/* Hidden picker for Replace Object (AI) */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={onReplaceFile}
+      />
+      {/* Hidden picker for Background Replacement (AI) */}
+      <input
+        ref={bgFileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={onBackgroundFile}
+      />
+      {/* Native color picker for Recolor (AI) — visually hidden but clickable so
+          .click() opens the OS picker. */}
+      <input
+        ref={colorInputRef}
+        type="color"
+        defaultValue="#d8b36a"
+        onChange={onRecolorColor}
+        style={{ position: "fixed", left: -9999, top: 0, width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+        tabIndex={-1}
+        aria-hidden="true"
+      />
+      {/* Native color picker for Background → Color */}
+      <input
+        ref={bgColorInputRef}
+        type="color"
+        defaultValue="#1565ff"
+        onChange={onBgColor}
+        style={{ position: "fixed", left: -9999, top: 0, width: 1, height: 1, opacity: 0, pointerEvents: "none" }}
+        tabIndex={-1}
+        aria-hidden="true"
+      />
+      {/* Hidden picker for Person Replace upload (AI) */}
+      <input
+        ref={personFileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: "none" }}
+        onChange={onPersonFile}
+      />
+
+      {/* Shared AI in-flight overlay (SDXL render takes a few seconds) */}
+      {(replacingId != null || bgBusy || removingId != null || recoloringId != null || clothesBusy || hairBusy || personBusy || faceBusy || logoBusy) && (
+        <div
+          style={{
+            position: "absolute", inset: 0, zIndex: 40, display: "flex",
+            alignItems: "center", justifyContent: "center",
+            background: "rgba(10,10,12,0.45)", backdropFilter: "blur(2px)",
+          }}
+        >
+          <div
+            style={{
+              padding: "14px 20px", borderRadius: 12, background: "rgba(24,24,28,0.9)",
+              border: "1px solid rgba(216,179,106,0.35)", color: "#f0ead9",
+              font: "14px/1.4 -apple-system, Segoe UI, system-ui, sans-serif",
+              boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+            }}
+          >
+            <span style={{ color: "#d8b36a" }}>✦</span> {bgBusy ? "Replacing background with AI…" : removingId != null ? "Removing object with AI…" : recoloringId != null ? "Recoloring object with AI…" : clothesBusy ? "Changing clothes with AI…" : hairBusy ? "Changing hair with AI…" : personBusy ? "Replacing person with AI…" : faceBusy ? "Editing face with AI…" : logoBusy ? "Applying logo finish with AI…" : "Replacing object with AI…"} <span style={{ opacity: 0.6 }}>this can take a few seconds</span>
+          </div>
+        </div>
+      )}
+
+      {/* Replace error toast */}
+      {replaceError && (
+        <div
+          style={{
+            position: "absolute", bottom: 18, left: "50%", transform: "translateX(-50%)", zIndex: 41,
+            maxWidth: "70vw", padding: "10px 14px", borderRadius: 10, background: "rgba(60,20,20,0.92)",
+            border: "1px solid rgba(255,120,100,0.4)", color: "#ffd9d2",
+            font: "13px/1.4 -apple-system, Segoe UI, system-ui, sans-serif",
+          }}
+        >
+          Replace failed: {replaceError}
+        </div>
+      )}
+
+      {/* Transient AI readout: what the planner detected + the self-eval score */}
+      {lastEditInfo && !replaceError && (
+        <div
+          style={{
+            position: "absolute", bottom: 18, left: "50%", transform: "translateX(-50%)", zIndex: 41,
+            maxWidth: "70vw", padding: "8px 13px", borderRadius: 999, background: "rgba(20,24,20,0.9)",
+            border: "1px solid rgba(216,179,106,0.35)", color: "#e9e1cc",
+            font: "12px/1.3 -apple-system, Segoe UI, system-ui, sans-serif",
+          }}
+        >
+          <span style={{ color: "#d8b36a" }}>✦ AI</span> {lastEditInfo}
+        </div>
+      )}
+
+      {/* Face AI tool — presets + intensity (Phase 12) */}
+      {faceModal && FACE_PRESETS[faceModal.feature] && (
+        <div
+          style={{ position: "absolute", inset: 0, zIndex: 42, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(10,10,12,0.5)", backdropFilter: "blur(3px)" }}
+          onClick={() => setFaceModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ width: 380, maxWidth: "86vw", padding: 18, borderRadius: 16, background: "rgba(24,24,28,0.92)", border: "1px solid rgba(255,255,255,0.12)", boxShadow: "0 16px 48px rgba(0,0,0,0.5)", color: "#f0ead9", font: "13px/1.4 -apple-system, Segoe UI, system-ui, sans-serif" }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+              <span style={{ color: "#d8b36a" }}>{FACE_PRESETS[faceModal.feature].icon}</span> {FACE_PRESETS[faceModal.feature].title}
+            </div>
+            <div style={{ opacity: 0.6, marginBottom: 12 }}>
+              Pick a style — identity, lighting and the rest of the face are preserved.
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, opacity: 0.92 }}>
+              <span>Intensity</span><span style={{ opacity: 0.6, fontVariantNumeric: "tabular-nums" }}>{faceIntensity}%</span>
+            </div>
+            <input
+              type="range" min={10} max={100} step={1} value={faceIntensity}
+              onChange={(e) => setFaceIntensity(Number(e.target.value))}
+              style={{ width: "100%", accentColor: "#d8b36a", cursor: "pointer", marginBottom: 12 }}
+            />
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              {FACE_PRESETS[faceModal.feature].presets.map(([label, prompt, direction]) => (
+                <button
+                  key={label}
+                  onClick={() => { const m = faceModal; setFaceModal(null); startFaceEdit(m.feature, m.id, { prompt, intensity: faceIntensity / 100, ...(direction ? { direction } : {}) }); }}
+                  style={{ flex: "1 1 44%", padding: "9px 10px", borderRadius: 9, border: "1px solid rgba(255,255,255,0.14)", background: "rgba(255,255,255,0.06)", color: "#f0ead9", cursor: "pointer", font: "inherit", fontWeight: 600 }}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(216,179,106,0.18)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.06)")}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+              <button onClick={() => setFaceModal(null)} style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.05)", color: "#f0ead9", cursor: "pointer", font: "inherit" }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Change Clothes (AI) — prompt dialog */}
+      {clothesModal && (
+        <div
+          style={{
+            position: "absolute", inset: 0, zIndex: 42, display: "flex",
+            alignItems: "center", justifyContent: "center",
+            background: "rgba(10,10,12,0.5)", backdropFilter: "blur(3px)",
+          }}
+          onClick={() => setClothesModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 380, maxWidth: "86vw", padding: 18, borderRadius: 16,
+              background: "rgba(24,24,28,0.92)", border: "1px solid rgba(255,255,255,0.12)",
+              boxShadow: "0 16px 48px rgba(0,0,0,0.5)", color: "#f0ead9",
+              font: "13px/1.4 -apple-system, Segoe UI, system-ui, sans-serif",
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+              <span style={{ color: "#d8b36a" }}>👕</span> Change clothes
+            </div>
+            <div style={{ opacity: 0.6, marginBottom: 10 }}>
+              Describe the new clothing — the face, hair and pose are preserved.
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              {CLOTHES_PRESETS.map(([label, p]) => (
+                <button key={label} type="button" onClick={() => setClothesText(p)} style={presetChip}>{label}</button>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, opacity: 0.92 }}>
+              <span>Intensity</span><span style={{ opacity: 0.6, fontVariantNumeric: "tabular-nums" }}>{aiIntensity}%</span>
+            </div>
+            <input
+              type="range" min={10} max={100} step={1} value={aiIntensity}
+              onChange={(e) => setAiIntensity(Number(e.target.value))}
+              style={{ width: "100%", accentColor: "#d8b36a", cursor: "pointer", marginBottom: 10 }}
+            />
+            <input
+              autoFocus
+              value={clothesText}
+              onChange={(e) => setClothesText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitClothes();
+                else if (e.key === "Escape") setClothesModal(null);
+              }}
+              placeholder="e.g. a blue denim jacket"
+              style={{
+                width: "100%", padding: "9px 11px", borderRadius: 9, boxSizing: "border-box",
+                border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.3)",
+                color: "#f0ead9", font: "inherit", outline: "none",
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+              <button
+                onClick={() => setClothesModal(null)}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.05)", color: "#f0ead9", cursor: "pointer", font: "inherit" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitClothes}
+                disabled={!clothesText.trim()}
+                style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: clothesText.trim() ? "#d8b36a" : "#5a5039", color: "#1a1a1a", fontWeight: 600, cursor: clothesText.trim() ? "pointer" : "default", font: "inherit", opacity: clothesText.trim() ? 1 : 0.6 }}
+              >
+                Generate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Background → Generate (AI) — prompt dialog */}
+      {bgGenModal && (
+        <div
+          style={{
+            position: "absolute", inset: 0, zIndex: 42, display: "flex",
+            alignItems: "center", justifyContent: "center",
+            background: "rgba(10,10,12,0.5)", backdropFilter: "blur(3px)",
+          }}
+          onClick={() => setBgGenModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 380, maxWidth: "86vw", padding: 18, borderRadius: 16,
+              background: "rgba(24,24,28,0.92)", border: "1px solid rgba(255,255,255,0.12)",
+              boxShadow: "0 16px 48px rgba(0,0,0,0.5)", color: "#f0ead9",
+              font: "13px/1.4 -apple-system, Segoe UI, system-ui, sans-serif",
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+              <span style={{ color: "#d8b36a" }}>✨</span> Generate background
+            </div>
+            <div style={{ opacity: 0.6, marginBottom: 10 }}>
+              Describe a new backdrop — every foreground object is preserved.
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              {BG_GEN_PRESETS.map(([label, p]) => (
+                <button key={label} type="button" onClick={() => setBgGenText(p)} style={presetChip}>{label}</button>
+              ))}
+            </div>
+            <input
+              autoFocus
+              value={bgGenText}
+              onChange={(e) => setBgGenText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitBgGenerate();
+                else if (e.key === "Escape") setBgGenModal(null);
+              }}
+              placeholder="e.g. a sunlit garden, soft depth of field"
+              style={{
+                width: "100%", padding: "9px 11px", borderRadius: 9, boxSizing: "border-box",
+                border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.3)",
+                color: "#f0ead9", font: "inherit", outline: "none",
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+              <button
+                onClick={() => setBgGenModal(null)}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.05)", color: "#f0ead9", cursor: "pointer", font: "inherit" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitBgGenerate}
+                style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: "#d8b36a", color: "#1a1a1a", fontWeight: 600, cursor: "pointer", font: "inherit" }}
+              >
+                Generate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Change Hair (AI) — prompt dialog */}
+      {hairModal && (
+        <div
+          style={{
+            position: "absolute", inset: 0, zIndex: 42, display: "flex",
+            alignItems: "center", justifyContent: "center",
+            background: "rgba(10,10,12,0.5)", backdropFilter: "blur(3px)",
+          }}
+          onClick={() => setHairModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 380, maxWidth: "86vw", padding: 18, borderRadius: 16,
+              background: "rgba(24,24,28,0.92)", border: "1px solid rgba(255,255,255,0.12)",
+              boxShadow: "0 16px 48px rgba(0,0,0,0.5)", color: "#f0ead9",
+              font: "13px/1.4 -apple-system, Segoe UI, system-ui, sans-serif",
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+              <span style={{ color: "#d8b36a" }}>💇</span> Change hair
+            </div>
+            <div style={{ opacity: 0.6, marginBottom: 10 }}>
+              Describe the new hairstyle or color — the face, eyes and ears are preserved.
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+              {HAIR_PRESETS.map(([label, p]) => (
+                <button key={label} type="button" onClick={() => setHairText(p)} style={presetChip}>{label}</button>
+              ))}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, opacity: 0.92 }}>
+              <span>Intensity</span><span style={{ opacity: 0.6, fontVariantNumeric: "tabular-nums" }}>{aiIntensity}%</span>
+            </div>
+            <input
+              type="range" min={10} max={100} step={1} value={aiIntensity}
+              onChange={(e) => setAiIntensity(Number(e.target.value))}
+              style={{ width: "100%", accentColor: "#d8b36a", cursor: "pointer", marginBottom: 10 }}
+            />
+            <input
+              autoFocus
+              value={hairText}
+              onChange={(e) => setHairText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitHair();
+                else if (e.key === "Escape") setHairModal(null);
+              }}
+              placeholder="e.g. long blonde wavy hair"
+              style={{
+                width: "100%", padding: "9px 11px", borderRadius: 9, boxSizing: "border-box",
+                border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.3)",
+                color: "#f0ead9", font: "inherit", outline: "none",
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+              <button
+                onClick={() => setHairModal(null)}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.05)", color: "#f0ead9", cursor: "pointer", font: "inherit" }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={submitHair}
+                disabled={!hairText.trim()}
+                style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: hairText.trim() ? "#d8b36a" : "#5a5039", color: "#1a1a1a", fontWeight: 600, cursor: hairText.trim() ? "pointer" : "default", font: "inherit", opacity: hairText.trim() ? 1 : 0.6 }}
+              >
+                Generate
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Person Replace (AI) — dual-option dialog: upload an image OR describe a person */}
+      {personModal && (
+        <div
+          style={{
+            position: "absolute", inset: 0, zIndex: 42, display: "flex",
+            alignItems: "center", justifyContent: "center",
+            background: "rgba(10,10,12,0.5)", backdropFilter: "blur(3px)",
+          }}
+          onClick={() => setPersonModal(null)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 380, maxWidth: "86vw", padding: 18, borderRadius: 16,
+              background: "rgba(24,24,28,0.92)", border: "1px solid rgba(255,255,255,0.12)",
+              boxShadow: "0 16px 48px rgba(0,0,0,0.5)", color: "#f0ead9",
+              font: "13px/1.4 -apple-system, Segoe UI, system-ui, sans-serif",
+            }}
+          >
+            <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 4 }}>
+              <span style={{ color: "#d8b36a" }}>🔁</span> Replace person
+            </div>
+            <div style={{ opacity: 0.6, marginBottom: 12 }}>
+              Describe a new person, or upload an image. The background and pose are preserved.
+            </div>
+            <input
+              autoFocus
+              value={personText}
+              onChange={(e) => setPersonText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitPersonPrompt();
+                else if (e.key === "Escape") setPersonModal(null);
+              }}
+              placeholder="e.g. a young queen in a green gown"
+              style={{
+                width: "100%", padding: "9px 11px", borderRadius: 9, boxSizing: "border-box",
+                border: "1px solid rgba(255,255,255,0.18)", background: "rgba(0,0,0,0.3)",
+                color: "#f0ead9", font: "inherit", outline: "none",
+              }}
+            />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 10 }}>
+              <button
+                onClick={submitPersonPrompt}
+                disabled={!personText.trim()}
+                style={{ padding: "7px 16px", borderRadius: 8, border: "none", background: personText.trim() ? "#d8b36a" : "#5a5039", color: "#1a1a1a", fontWeight: 600, cursor: personText.trim() ? "pointer" : "default", font: "inherit", opacity: personText.trim() ? 1 : 0.6 }}
+              >
+                Generate
+              </button>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "14px 0 10px", opacity: 0.5 }}>
+              <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.15)" }} />
+              <span style={{ fontSize: 11 }}>OR</span>
+              <div style={{ flex: 1, height: 1, background: "rgba(255,255,255,0.15)" }} />
+            </div>
+            <button
+              onClick={startPersonUpload}
+              style={{ width: "100%", padding: "9px 12px", borderRadius: 9, border: "1px solid rgba(255,255,255,0.18)", background: "rgba(255,255,255,0.06)", color: "#f0ead9", cursor: "pointer", font: "inherit" }}
+            >
+              ⤴ Upload person image
+            </button>
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+              <button
+                onClick={() => setPersonModal(null)}
+                style={{ padding: "7px 14px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.15)", background: "rgba(255,255,255,0.05)", color: "#f0ead9", cursor: "pointer", font: "inherit" }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{ ...chip, position: "absolute", top: 12, left: 12, zIndex: 10, pointerEvents: "none" }}>
         {selected ? `selected: ${selected.category}#${selected.id}` : "click an object to select it"}
         {selected ? (selectedLifted ? "  ·  drag to move" : "  ·  preparing…") : ""}
@@ -950,6 +2187,32 @@ export default function App() {
       </div>
 
       <div style={{ position: "absolute", top: 12, right: 12, zIndex: 10, display: "flex", gap: 8 }}>
+        {/* Identity Preservation (AI) — one optional toggle, OFF by default. */}
+        <button
+          onClick={() => setPreserveIdentity((v) => !v)}
+          title="Preserve facial identity for Change Hair, Change Clothes and Person Replace"
+          style={{
+            padding: "7px 12px", borderRadius: 6, border: "1px solid " + (preserveIdentity ? "#d8b36a" : "rgba(255,255,255,0.15)"),
+            background: preserveIdentity ? "rgba(216,179,106,0.18)" : "rgba(255,255,255,0.06)",
+            color: preserveIdentity ? "#e6cf9c" : "#cfc7b5", fontWeight: 600, cursor: "pointer",
+            font: "13px -apple-system, Segoe UI, system-ui, sans-serif",
+          }}
+        >
+          {preserveIdentity ? "◉" : "◯"} Preserve Identity
+        </button>
+        {/* Lighting & Shadow Harmonization (AI) — one optional toggle, OFF by default. */}
+        <button
+          onClick={() => setAutoLighting((v) => !v)}
+          title="Harmonize lighting & shadows after Replace, Hair, Clothes, Background and Person edits"
+          style={{
+            padding: "7px 12px", borderRadius: 6, border: "1px solid " + (autoLighting ? "#d8b36a" : "rgba(255,255,255,0.15)"),
+            background: autoLighting ? "rgba(216,179,106,0.18)" : "rgba(255,255,255,0.06)",
+            color: autoLighting ? "#e6cf9c" : "#cfc7b5", fontWeight: 600, cursor: "pointer",
+            font: "13px -apple-system, Segoe UI, system-ui, sans-serif",
+          }}
+        >
+          {autoLighting ? "◉" : "◯"} Auto Lighting
+        </button>
         <button onClick={undo} disabled={!history.past.length} style={btn(history.past.length > 0)}>
           ↶ Undo
         </button>
@@ -992,6 +2255,13 @@ export default function App() {
           {/* BASE — the original image, the only visual source of truth */}
           <Image image={backgroundImage} x={0} y={0} width={imageSize.width} height={imageSize.height} listening={false} />
 
+          {/* AI BACKGROUND REPLACEMENT — full canvas (new backdrop + preserved
+              foreground), drawn over the base so the new background shows; fills
+              and objects still render on top. */}
+          {bgResult && (
+            <Image image={bgResult.img} x={0} y={0} width={imageSize.width} height={imageSize.height} listening={false} />
+          )}
+
           {/* REPAIR FILLS — inpainted patches covering lifted/erased footprints
               (decoded elements, so a fill paints the SAME frame it is requested) */}
           {fills.map((f) => (
@@ -1011,6 +2281,12 @@ export default function App() {
             const entry = session.entries[v.objectId];
             const isActive = entry?.state === "active";
             const fillReady = !!(a && a.fill);
+            // integrated AI edit: the versioned object-sized canvas this object
+            // currently resolves to (null when unedited or a text object)
+            const editImg =
+              !v.isText && entry?.aiEdit != null
+                ? editAssetsRef.current.get(`${v.objectId}:${entry.aiEdit}`) || null
+                : null;
             // text becomes synthesized typography only once edited AND its
             // footprint fill is PAINTABLE (decoded) — else the original ghosts
             // through (fillReady = decoded element present, not just URL known)
@@ -1057,6 +2333,7 @@ export default function App() {
                 glow={fr ? fr.selection.glow : session.selectedId === v.objectId ? 1 : 0}
                 opacity={opacity * userOpacity}
                 cutoutImg={!v.isText && isActive && a && a.cutout ? a.cutout.img : null}
+                editImg={editImg}
                 refText={v.isText ? om.getObject(v.objectId)?.text : null}
                 styleOverride={styleOverride}
                 onChange={(attrs) => handleObjectChange(v.objectId, attrs, v.text)}
@@ -1066,6 +2343,13 @@ export default function App() {
               />
             );
           })}
+
+          {/* AI REPLACEMENTS — top-most patches that swap an object's pixels for
+              the uploaded replacement, footprint-shaped so only that layer
+              changes. listening=false so the underlying object stays selectable. */}
+          {replacements.map((r) => (
+            <Image key={`replace-${r.id}`} image={r.img} x={r.x} y={r.y} width={r.w} height={r.h} listening={false} />
+          ))}
         </Layer>
       </Stage>
 

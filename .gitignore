@@ -10,8 +10,16 @@ editable-editor/dist/
 
 # Model weights (large binaries — keep out of git)
 *.pth
+*.safetensors
+*.ckpt
 models/
 grounding_weights/
+
+# Vendored ComfyUI checkout + its models/venv (~21GB — never commit)
+ComfyUI/
+
+# Temp dev smoke scripts
+backend/_smoke_*.py
 
 # Generated demo output
 outputs/

@@ -1,0 +1,18 @@
+{
+  "_comment": "Lighting & Shadow Harmonization PIPELINE CONFIG (Phase 10). This is NOT a ComfyUI/SDXL graph — lighting harmonization is a fast CPU/OpenCV post-process, never a diffusion re-render. The config lives here (not hardcoded in Python): backend/lighting_manager.py loads it and backend/comfy_lighting.py executes the listed stages with these parameters. `strength` is the global blend (0=no change, 1=full match); each stage has its own enabled flag + strength so the engine stays tunable without code changes.",
+  "version": 1,
+  "pipeline": ["analyze", "white_balance", "exposure", "contrast", "gamma", "saturation", "shadow", "edge_blend"],
+  "strength": 0.7,
+  "full_image_strength": 0.4,
+  "white_balance": { "enabled": true, "strength": 0.7, "max_shift": 24.0 },
+  "exposure":      { "enabled": true, "strength": 0.6, "max_shift": 48.0 },
+  "contrast":      { "enabled": true, "strength": 0.5, "min_scale": 0.7, "max_scale": 1.4 },
+  "gamma":         { "enabled": true, "strength": 0.4, "min": 0.6, "max": 1.7 },
+  "saturation":    { "enabled": true, "strength": 0.5, "min_scale": 0.6, "max_scale": 1.6 },
+  "shadow": {
+    "enabled": true, "strength": 0.35, "softness": 0.6,
+    "max_extend_frac": 0.12, "min_opacity": 0.04, "max_opacity": 0.5
+  },
+  "edge_blend": { "enabled": true, "feather_px": 3, "decontaminate": true },
+  "analysis": { "hist_bins": 32, "ambient_from_ring": true, "robust": true }
+}

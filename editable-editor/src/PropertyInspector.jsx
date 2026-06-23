@@ -76,8 +76,8 @@ function place(anchor, vp, h) {
 }
 
 function Slider({ c, value, onStart, onChange }) {
-  const v = Number.isFinite(value) ? value : c.min;
-  const disp = c.field === "opacity" ? `${Math.round(v)}${c.unit}` : `${c.step < 1 ? v.toFixed(2) : Math.round(v)}${c.unit}`;
+  const v = Number.isFinite(value) ? value : c.control.min;
+  const disp = c.control.field === "opacity" ? `${Math.round(v)}${c.control.unit}` : `${c.control.step < 1 ? v.toFixed(2) : Math.round(v)}${c.control.unit}`;
   return (
     <div style={ctrlRow}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, opacity: 0.92 }}>
@@ -195,12 +195,13 @@ export default function PropertyInspector({ object, panel, values, anchorRect, v
       );
     }
     if (c.type === "color") {
-      const hex = rgbToHex(values.fill);
+      const field = c.field || "fill";
+      const hex = rgbToHex(values[field]);
       return (
         <div key={a.id} style={{ ...ctrlRow, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div style={ctrlHead}>
             <span style={{ width: 16, textAlign: "center" }}>{a.icon}</span>
-            <span>Color</span>
+            <span>{a.label}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span style={{ opacity: 0.6, fontVariantNumeric: "tabular-nums" }}>{hex}</span>
@@ -208,9 +209,61 @@ export default function PropertyInspector({ object, panel, values, anchorRect, v
               type="color"
               defaultValue={hex}
               onPointerDown={onControlStart}
-              onInput={(e) => onControlChange({ fill: e.target.value })}
+              onInput={(e) => onControlChange({ [field]: e.target.value })}
               style={{ width: 30, height: 26, padding: 0, border: "none", background: "none", cursor: "pointer" }}
             />
+          </div>
+        </div>
+      );
+    }
+    if (c.type === "align") {
+      const cur = values.align || "center";
+      const opt = (val, label) => (
+        <button
+          key={val}
+          onClick={() => { onControlStart(); onControlChange({ align: val }); }}
+          style={{
+            flex: 1, padding: "6px 0", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)",
+            background: cur === val ? "#d8b36a" : "rgba(255,255,255,0.05)",
+            color: cur === val ? "#1a1a1a" : "#f0ead9", cursor: "pointer", font: "inherit",
+          }}
+        >
+          {label}
+        </button>
+      );
+      return (
+        <div key={a.id} style={ctrlRow}>
+          <div style={ctrlHead}>
+            <span style={{ width: 16, textAlign: "center" }}>{a.icon}</span>
+            <span>Alignment</span>
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>{opt("left", "Left")}{opt("center", "Center")}{opt("right", "Right")}</div>
+        </div>
+      );
+    }
+    if (c.type === "gradient") {
+      const g = Array.isArray(values.gradient) ? values.gradient : null;
+      const start = g ? g[1] : rgbToHex(values.fill);
+      const end = g ? g[3] : "#5a2e12";
+      const sw = { width: 30, height: 26, padding: 0, border: "none", background: "none", cursor: "pointer" };
+      return (
+        <div key={a.id} style={ctrlRow}>
+          <div style={ctrlHead}>
+            <span style={{ width: 16, textAlign: "center" }}>{a.icon}</span>
+            <span>Gradient</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input type="color" defaultValue={start} title="Top colour" onPointerDown={onControlStart}
+              onInput={(e) => onControlChange({ gradient: [0, e.target.value, 1, end] })} style={sw} />
+            <span style={{ opacity: 0.5 }}>→</span>
+            <input type="color" defaultValue={end} title="Bottom colour" onPointerDown={onControlStart}
+              onInput={(e) => onControlChange({ gradient: [0, start, 1, e.target.value] })} style={sw} />
+            <button
+              onClick={() => { onControlStart(); onControlChange({ gradient: null }); }}
+              style={{ marginLeft: "auto", padding: "4px 8px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "rgba(255,255,255,0.05)", color: "#f0ead9", cursor: "pointer", font: "inherit", fontSize: 11 }}
+            >
+              Off
+            </button>
           </div>
         </div>
       );

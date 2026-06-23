@@ -1,0 +1,54 @@
+{
+  "_comment": "SDXL background-replacement workflow (ComfyUI API format). Same proven shape as replace_object.json, but the mask is the BACKGROUND region (everything the foreground does not cover). The graph STRUCTURE lives here; backend/comfy_background.py injects per-request VALUES by node id (never rebuilds the graph). Flow: load checkpoint -> encode prompts -> VAE-encode the init image (original foreground over the uploaded background) -> restrict denoising to the background via SetLatentNoiseMask -> KSampler harmonises only the backdrop to the foreground's lighting -> decode -> save. The foreground latent is fixed, so foreground objects are preserved; the backend additionally re-composites the crisp original foreground at full resolution.",
+  "checkpoint": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": { "ckpt_name": "sd_xl_base_1.0.safetensors" }
+  },
+  "positive_prompt": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "a cohesive background scene", "clip": ["checkpoint", 1] }
+  },
+  "negative_prompt": {
+    "class_type": "CLIPTextEncode",
+    "inputs": { "text": "blurry, lowres, distorted, deformed, artifacts, seam, extra objects, watermark, text", "clip": ["checkpoint", 1] }
+  },
+  "init_image": {
+    "class_type": "LoadImage",
+    "inputs": { "image": "background_init.png" }
+  },
+  "background_mask": {
+    "class_type": "LoadImageMask",
+    "inputs": { "image": "background_mask.png", "channel": "red" }
+  },
+  "vae_encode": {
+    "class_type": "VAEEncode",
+    "inputs": { "pixels": ["init_image", 0], "vae": ["checkpoint", 2] }
+  },
+  "set_mask": {
+    "class_type": "SetLatentNoiseMask",
+    "inputs": { "samples": ["vae_encode", 0], "mask": ["background_mask", 0] }
+  },
+  "ksampler": {
+    "class_type": "KSampler",
+    "inputs": {
+      "model": ["checkpoint", 0],
+      "seed": 0,
+      "steps": 28,
+      "cfg": 7.0,
+      "sampler_name": "dpmpp_2m",
+      "scheduler": "karras",
+      "denoise": 0.6,
+      "positive": ["positive_prompt", 0],
+      "negative": ["negative_prompt", 0],
+      "latent_image": ["set_mask", 0]
+    }
+  },
+  "vae_decode": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["ksampler", 0], "vae": ["checkpoint", 2] }
+  },
+  "save": {
+    "class_type": "SaveImage",
+    "inputs": { "images": ["vae_decode", 0], "filename_prefix": "background_replace" }
+  }
+}
