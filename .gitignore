@@ -31,6 +31,11 @@ pipeline/_out/
 # Large real benchmark sample (copy uploads/test.png here locally to include it)
 pipeline/benchmark_images/bookcover.png
 
+# Local browser-verification screenshots (proof artifacts, not source)
+.bug-evidence/
+.fix-evidence/
+.text-fix-evidence/
+
 # OS / editor
 .DS_Store
 .vscode/

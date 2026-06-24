@@ -87,4 +87,9 @@ export const MODIFIERS = new Set([
 export const DEFAULT_CONFIG = Object.freeze({
   duplicateIoU: 0.8, // same-category boxes above this IoU collapse to one logical object
   childContainment: 0.6, // a part is a child if >60% of its area sits inside a parent
+  // a non-text detection with >= this fraction of its area inside an OCR text
+  // line is a mislabelled fragment of that text (SAM word/letter mask that CLIP
+  // tagged emblem/symbol/ornament) -> ceded to the text object, so OCR text owns
+  // every text region. Honours "OCR-backed text wins" (see VOCABULARY header).
+  textDominanceContainment: 0.7,
 });

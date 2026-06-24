@@ -107,6 +107,41 @@ export function deriveModel(rawObjects, options = {}) {
     }
   }
 
+  // ---- 2b. OCR-text dominance: cede text-region fragments to the text object ----
+  //   ROOT CAUSE this addresses: the "segment-everything" SAM pass also segments
+  //   individual words/letters inside a text line; CLIP then labels those crops
+  //   emblem/symbol/ornament at LOW confidence. Those mislabelled fragments
+  //   survive as editable "decor" and — being smaller than the whole line — win
+  //   click selection (which is smallest-area-first), so a word like "EXPLORING"
+  //   reads as symbol#N instead of its text line. Here, any non-text editable
+  //   detection mostly contained in an OCR text line is recognised as part of
+  //   that text and demoted to it: the OCR text object becomes the SOLE editable
+  //   owner of every text region. Demoted objects are RETAINED & promotable
+  //   (nothing discarded) and their baked pixels still live in the base image,
+  //   so nothing visually changes — they simply stop shadowing the text.
+  const ocrTextBoxes = [...objects.values()].filter(
+    (o) => o.role === ROLE.TEXT && o.isOcrText && o.editable
+  );
+  if (ocrTextBoxes.length) {
+    for (const o of objects.values()) {
+      if (!o.editable || o.role === ROLE.TEXT) continue;
+      let owner = null;
+      let bestInside = config.textDominanceContainment;
+      for (const t of ocrTextBoxes) {
+        const inside = containment(o.bbox, t.bbox); // fraction of o inside the text line
+        if (inside > bestInside) {
+          bestInside = inside;
+          owner = t;
+        }
+      }
+      if (owner) {
+        o.editable = false;
+        o.ignoredReason = "covered-by-text";
+        o.coveredByText = owner.id;
+      }
+    }
+  }
+
   // ---- 3. demote container-dominated "persons" (framed-portrait panels) ----
   //   Purely semantic: a parent whose label is dominated by frame/portrait/scene
   //   tokens is structure, not a person — regardless of its size. A real person
