@@ -57,6 +57,29 @@ with open(os.path.join(LAYERS_DIR, "metadata.json")) as fh:
 
 _background = None
 
+# Footprints of every OCR text object. Text crops are opaque rectangles drawn on
+# top of the artwork, so a lift/edit fill must never paint over a *different*
+# text object (that would erase, crop or repaint a neighbouring line). We use
+# these to enforce the pixel-ownership rule on the fill collar.
+TEXT_OBJS = [
+    (int(o["x"]), int(o["y"]), int(o["width"]), int(o["height"]), oid)
+    for oid, o in META.items()
+    if "text" in str(o.get("type", "")).lower() or "text" in str(o.get("category", "")).lower()
+]
+
+
+def other_text_mask(self_id, H, W):
+    """Bool mask covering every OTHER text object's footprint rectangle."""
+    mask = np.zeros((H, W), dtype=bool)
+    for x, y, w, h, oid in TEXT_OBJS:
+        if oid == self_id:
+            continue
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(W, x + w), min(H, y + h)
+        if x1 > x0 and y1 > y0:
+            mask[y0:y1, x0:x1] = True
+    return mask
+
 
 def background_rgb():
     global _background
@@ -193,11 +216,23 @@ def lift(req: LiftRequest):
     w, h = ox1 - ox0, oy1 - oy0
     obj_alpha01 = obj_mask.astype(np.float32) / 255.0
 
-    # synthesize an attached shadow (real cutouts only; not opaque text rects)
+    # A text crop is saved as a fully-opaque rectangle (coverage == 1.0): its
+    # alpha carries no silhouette. Such a crop must NOT get a synthesized drop
+    # shadow — the shadow is a big blurred copy of the WHOLE rectangle that,
+    # folded into the inpaint mask below, bleeds the fill tens of pixels past the
+    # footprint and erases the lines beneath it. (The old `if has_alpha` test
+    # never caught text, whose alpha is all-255.) The high threshold keeps every
+    # genuine silhouette cutout — and even near-solid decor — on the normal
+    # shadowed path; only true rectangular text/badge crops are treated as flat.
+    fp = obj_mask[oy0:oy1, ox0:ox1]
+    coverage = float((fp > 0).mean()) if fp.size else 0.0
+    flat_rect = has_alpha and coverage > 0.995
+
+    # synthesize an attached shadow for genuine silhouette cutouts only
     sp = shadow_params(w, h)
     shadow_full = (
         synthesize_shadow(obj_alpha01, blur=sp["blur"], dx=sp["dx"], dy=sp["dy"])
-        if has_alpha
+        if (has_alpha and not flat_rect)
         else None
     )
 
@@ -216,7 +251,15 @@ def lift(req: LiftRequest):
     fk = FILL_FEATHER | 1
     expanded = cv2.dilate(inpaint_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (fk, fk)))
     collar = cv2.GaussianBlur(expanded.astype(np.float32), (fk, fk), 0) / 255.0
-    fx0, fy0, fx1, fy1 = _bbox_of(collar > 0.02)
+    # Pixel ownership: never let this object's fill paint over a DIFFERENT text
+    # object. Editing/lifting/deleting one line must not erase, crop or repaint a
+    # neighbour — so we zero the fill collar wherever another text footprint sits.
+    collar[other_text_mask(req.objectId, H, W)] = 0.0
+    box = _bbox_of(collar > 0.02)
+    if box is None:  # safety: a fully-clipped collar would mean an empty fill
+        collar = cv2.GaussianBlur(expanded.astype(np.float32), (fk, fk), 0) / 255.0
+        box = _bbox_of(collar > 0.02)
+    fx0, fy0, fx1, fy1 = box
     fill_rgba = np.dstack(
         [recon[fy0:fy1, fx0:fx1], np.clip(collar[fy0:fy1, fx0:fx1] * 255.0, 0, 255)]
     ).astype("uint8")

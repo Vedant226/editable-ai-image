@@ -1503,7 +1503,19 @@ export default function App() {
           const op = Math.max(0, Math.min(1, patch.opacity / 100));
           return { ...base, entries: { ...base.entries, [id]: { ...e, opacity: op } } };
         }
-        return { ...base, entries: { ...base.entries, [id]: { ...e, style: { ...(e.style || {}), ...patch } } } };
+        const styled = { ...e, style: { ...(e.style || {}), ...patch } };
+        // A typographic style change on an OCR text object must take effect
+        // WITHOUT first pressing "Replace text". The synthesized-text renderer
+        // only engages once the entry carries a string, so seed it with the
+        // ORIGINAL OCR text the first time the user styles it. Appearance is
+        // preserved (estimateTypography matches the bitmap; only the touched
+        // property changes) and the content is unchanged — Replace text remains
+        // the only way to alter the actual words.
+        const o = om.getObject(id);
+        if (o && styled.text == null && o.text && categoryGroup(o) === "text") {
+          styled.text = o.text;
+        }
+        return { ...base, entries: { ...base.entries, [id]: styled } };
       });
       kick();
     },
